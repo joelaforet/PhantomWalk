@@ -30,7 +30,8 @@ def _tagged_monomers(system: str) -> tuple[list[str], str]:
     if system == "pes":
         bisphenol_a = "c1{<}ccc(C(C)(C)c2ccc({>}cc2))cc1"
         diphenyl_sulfone = "O=S(=O)(c1{<}ccc(cc1))c1ccc({>}cc1)"
-        return [bisphenol_a, diphenyl_sulfone], "ABABB"
+        # Three BPA and two BPS units give the requested 40:60 BPS:BPA ratio.
+        return [bisphenol_a, diphenyl_sulfone], "AABAB"
     raise ValueError(f"unknown system {system!r}; choose from {tuple(SYSTEM_DENSITIES)}")
 
 
