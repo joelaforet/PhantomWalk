@@ -70,6 +70,21 @@ def parameterize_all_atom(
 ) -> AllAtomParameters:
     """Label an mBuild compound with Sage and return numeric parameter tables."""
 
+    children = list(compound.children)
+    child_by_particle = {
+        particle: child for child in children for particle in child.particles()
+    }
+    has_cross_child_bond = any(
+        child_by_particle.get(first) is not child_by_particle.get(second)
+        for first, second in compound.bonds()
+    )
+    if (
+        len(children) > 1
+        and sum(child.n_particles for child in children) == compound.n_particles
+        and not has_cross_child_bond
+    ):
+        return _parameterize_children(compound, children, force_field_name)
+
     from openff.toolkit import ForceField, Topology
     from openff.units import unit
 
@@ -119,7 +134,60 @@ def parameterize_all_atom(
     return result
 
 
-def _collect_torsions(labels: dict[Any, Any], result: AllAtomParameters, improper: bool, unit: Any) -> None:
+def _parameterize_children(
+    compound: Any,
+    children: list[Any],
+    force_field_name: str,
+) -> AllAtomParameters:
+    """Parameterize disconnected top-level chains and merge their tables."""
+
+    box = getattr(compound, "box", None)
+    if box is None:
+        raise ValueError("compound.box must define periodic box lengths")
+    merged = AllAtomParameters(
+        positions_a=np.asarray(compound.xyz, dtype=float) * 10.0,
+        box_lengths_a=np.asarray(box.lengths, dtype=float) * 10.0,
+    )
+    offset = 0
+    for child in children:
+        original_box = child.box
+        child.box = box
+        current = parameterize_all_atom(child, force_field_name)
+        child.box = original_box
+        merged.bonds.extend(
+            tuple(index + offset for index in group) for group in current.bonds
+        )
+        merged.angles.extend(
+            tuple(index + offset for index in group) for group in current.angles
+        )
+        merged.dihedrals.extend(
+            tuple(index + offset for index in group) for group in current.dihedrals
+        )
+        merged.impropers.extend(
+            tuple(index + offset for index in group) for group in current.impropers
+        )
+        merged.bond_types.extend(current.bond_types)
+        merged.angle_types.extend(current.angle_types)
+        merged.dihedral_types.extend(current.dihedral_types)
+        merged.improper_types.extend(current.improper_types)
+        merged.bond_lengths_a.update(current.bond_lengths_a)
+        merged.angle_params.update(current.angle_params)
+        merged.dihedral_params.update(current.dihedral_params)
+        merged.improper_params.update(current.improper_params)
+        merged.epsilon_ref_kcal_mol = max(
+            merged.epsilon_ref_kcal_mol, current.epsilon_ref_kcal_mol
+        )
+        merged.sigma_ref_a = max(merged.sigma_ref_a, current.sigma_ref_a)
+        offset += child.n_particles
+    return merged
+
+
+def _collect_torsions(
+    labels: dict[Any, Any],
+    result: AllAtomParameters,
+    improper: bool,
+    unit: Any,
+) -> None:
     """Expand multi-term OpenFF torsions into HOOMD periodic terms."""
 
     groups = result.impropers if improper else result.dihedrals

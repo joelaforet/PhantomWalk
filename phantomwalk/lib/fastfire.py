@@ -87,7 +87,11 @@ def _frame(parameters: AllAtomParameters) -> Any:
     return frame
 
 
-def _forces(hoomd: Any, parameters: AllAtomParameters, settings: AllAtomFastFIRESettings) -> list[Any]:
+def _forces(
+    hoomd: Any,
+    parameters: AllAtomParameters,
+    settings: AllAtomFastFIRESettings,
+) -> list[Any]:
     forces = []
     if parameters.bonds:
         force = hoomd.md.bond.Harmonic()

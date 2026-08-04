@@ -22,3 +22,21 @@ def test_sage_230_parameterizes_explicit_hydrogens():
     assert parameters.epsilon_ref_kcal_mol > 0
     assert parameters.sigma_ref_a > 0
     np.testing.assert_allclose(parameters.box_lengths_a, [30, 30, 30])
+
+
+def test_parameterizes_rooted_chains_as_separate_molecules():
+    """A melt root maps chain-local OpenFF labels to global atom indices."""
+
+    mbuild = pytest.importorskip("mbuild")
+    root = mbuild.Compound()
+    for shift in (0.5, 2.0):
+        chain = mbuild.load("CC", smiles=True)
+        chain.translate([shift, 1.5, 1.5])
+        root.add(chain)
+    root.box = mbuild.Box(lengths=[4, 4, 4])
+
+    parameters = parameterize_all_atom(root)
+
+    assert len(parameters.positions_a) == 16
+    assert len(parameters.bonds) == 14
+    assert max(max(group) for group in parameters.bonds) == 15
