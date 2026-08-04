@@ -64,11 +64,8 @@ def compound_to_openff_molecule(compound: Any) -> Any:
     return molecule
 
 
-def parameterize_all_atom(
-    compound: Any,
-    force_field_name: str = "openff-2.3.0.offxml",
-) -> AllAtomParameters:
-    """Label an mBuild compound with Sage and return numeric parameter tables."""
+def _molecular_compounds(compound: Any) -> list[Any]:
+    """Return disconnected top-level chains, or the compound itself."""
 
     children = list(compound.children)
     child_by_particle = {
@@ -83,6 +80,18 @@ def parameterize_all_atom(
         and sum(child.n_particles for child in children) == compound.n_particles
         and not has_cross_child_bond
     ):
+        return children
+    return [compound]
+
+
+def parameterize_all_atom(
+    compound: Any,
+    force_field_name: str = "openff-2.3.0.offxml",
+) -> AllAtomParameters:
+    """Label an mBuild compound with Sage and return numeric parameter tables."""
+
+    children = _molecular_compounds(compound)
+    if len(children) != 1 or children[0] is not compound:
         return _parameterize_children(compound, children, force_field_name)
 
     from openff.toolkit import ForceField, Topology
@@ -132,6 +141,30 @@ def parameterize_all_atom(
     _collect_torsions(labels["ProperTorsions"], result, improper=False, unit=unit)
     _collect_torsions(labels["ImproperTorsions"], result, improper=True, unit=unit)
     return result
+
+
+def create_openmm_handoff(
+    compound: Any,
+    force_field_name: str = "openff-2.3.0.offxml",
+) -> tuple[Any, Any]:
+    """Create an Interchange and OpenMM System with Sage 2.3 AshGC charges."""
+
+    from openff.interchange import Interchange
+    from openff.toolkit import ForceField, Topology
+    from openff.units import unit
+
+    molecules = [compound_to_openff_molecule(child) for child in _molecular_compounds(compound)]
+    topology = Topology.from_molecules(molecules)
+    box = getattr(compound, "box", None)
+    if box is None:
+        raise ValueError("compound.box must define periodic box lengths")
+    interchange = Interchange.from_smirnoff(
+        ForceField(force_field_name),
+        topology,
+        box=np.diag(np.asarray(box.lengths, dtype=float)) * unit.nanometer,
+        positions=np.asarray(compound.xyz, dtype=float) * unit.nanometer,
+    )
+    return interchange, interchange.to_openmm_system()
 
 
 def _parameterize_children(
