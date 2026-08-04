@@ -6,6 +6,7 @@ dependencies:
   - gsd >=3.0
   - hoomd>=5.0,!=5.3.0
   - numpy >=2.0, <2.3
+  - numba
   - python >=3.12, <3.13
   - setuptools <81
   - cmeutils >=1.3
