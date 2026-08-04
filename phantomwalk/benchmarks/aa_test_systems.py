@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -35,18 +36,35 @@ def _tagged_monomers(system: str) -> tuple[list[str], str]:
     raise ValueError(f"unknown system {system!r}; choose from {tuple(SYSTEM_DENSITIES)}")
 
 
-def build_chain(system: str, degree: int = 50) -> Any:
+def build_chain(
+    system: str,
+    degree: int = 50,
+    seed: int = 11,
+    box_length: float | None = None,
+) -> Any:
     """Build one explicit-hydrogen chain with mBuild's develop path API."""
 
     import mbuild as mb
-    from mbuild.path import straight_line
+    from mbuild.path import hard_sphere_random_walk
+    from mbuild.path.constraints import CuboidConstraint
 
     smiles, sequence = _tagged_monomers(system)
+    if degree % len(sequence):
+        raise ValueError(f"degree must be divisible by the {len(sequence)}-unit sequence")
     polymer = mb.Polymer()
     for monomer_smiles in smiles:
         monomer = mb.load(monomer_smiles, smiles=True)
         polymer.add_monomer(monomer, head_tag="<", tail_tag=">", separation=0.15)
-    path = straight_line(N=degree * len(sequence), spacing=0.5)
+    constraint = None
+    if box_length is not None:
+        constraint = CuboidConstraint(box_length, pbc=(True, True, True))
+    path = hard_sphere_random_walk(
+        termination=degree,
+        bond_length=0.5,
+        radius=0.05,
+        seed=seed,
+        volume_constraint=constraint,
+    )
     polymer.build_from_path(path, sequence=sequence, energy_minimize=False)
     return polymer
 
@@ -62,16 +80,13 @@ def build_test_system(
 
     import mbuild as mb
 
-    chain = build_chain(system, degree)
+    chain = build_chain(system, degree, seed)
     n_chains = max(1, int(np.ceil(target_atoms / chain.n_particles)))
-    root = mb.Compound(name=system.upper())
-    rng = np.random.default_rng(seed)
     chain_mass = sum(float(particle.mass) for particle in chain.particles())
     box_length = (n_chains * chain_mass * AMU_NM3_TO_G_CM3 / density_g_cm3) ** (1 / 3)
-    for _ in range(n_chains):
-        copy = mb.clone(chain)
-        copy.translate(rng.uniform(0, box_length, size=3) - copy.center)
-        root.add(copy)
+    root = mb.Compound(name=system.upper())
+    for chain_index in range(n_chains):
+        root.add(build_chain(system, degree, seed + chain_index, box_length))
     root.box = mb.Box(lengths=[box_length] * 3)
     return root
 
@@ -98,7 +113,9 @@ def run_matrix(output: Path, device: str = "auto") -> None:
                     key = (system, density, target_atoms, seed)
                     if key in completed:
                         continue
+                    construction_start = time.perf_counter()
                     compound = build_test_system(system, density, target_atoms, seed=seed)
+                    construction_s = time.perf_counter() - construction_start
                     result = run_all_atom_fastfire(
                         compound,
                         AllAtomFastFIRESettings(seed=seed, device=device),
@@ -109,10 +126,12 @@ def run_matrix(output: Path, device: str = "auto") -> None:
                         target_atoms=target_atoms,
                         actual_atoms=compound.n_particles,
                         seed=seed,
+                        construction_s=construction_s,
                         **asdict(result),
                     )
                     with output.open("a") as handle:
                         handle.write(json.dumps(row) + "\n")
+                    print(json.dumps(row), flush=True)
 
 
 def main() -> None:
