@@ -49,10 +49,15 @@ def _as_float(value: Any, target_unit: Any) -> float:
 def compound_to_openff_molecule(compound: Any) -> Any:
     """Convert an mBuild compound to an OpenFF molecule with its coordinates."""
 
+    from rdkit import Chem
+
     from openff.toolkit import Molecule
     from openff.units import unit
 
     rdkit_molecule = compound.to_rdkit()
+    for bond in rdkit_molecule.GetBonds():
+        if bond.GetBondType() == Chem.BondType.UNSPECIFIED:
+            bond.SetBondType(Chem.BondType.SINGLE)
     molecule = Molecule.from_rdkit(
         rdkit_molecule,
         allow_undefined_stereo=True,
@@ -182,11 +187,26 @@ def _parameterize_children(
         box_lengths_a=np.asarray(box.lengths, dtype=float) * 10.0,
     )
     offset = 0
+    cached: dict[tuple[Any, ...], AllAtomParameters] = {}
     for child in children:
-        original_box = child.box
-        child.box = box
-        current = parameterize_all_atom(child, force_field_name)
-        child.box = original_box
+        particles = list(child.particles())
+        local_index = {particle: index for index, particle in enumerate(particles)}
+        topology_key = (
+            tuple(particle.element.atomic_number for particle in particles),
+            tuple(
+                sorted(
+                    tuple(sorted((local_index[first], local_index[second])))
+                    for first, second in child.bonds()
+                )
+            ),
+        )
+        current = cached.get(topology_key)
+        if current is None:
+            original_box = child.box
+            child.box = box
+            current = parameterize_all_atom(child, force_field_name)
+            child.box = original_box
+            cached[topology_key] = current
         merged.bonds.extend(
             tuple(index + offset for index in group) for group in current.bonds
         )

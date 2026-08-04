@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from phantomwalk.lib.all_atom import create_openmm_handoff, parameterize_all_atom
+from phantomwalk.benchmarks.aa_test_systems import build_chain
 
 
 def test_sage_230_parameterizes_explicit_hydrogens():
@@ -55,3 +56,15 @@ def test_openmm_handoff_uses_ashgc_charges():
 
     assert system.getNumParticles() == 8
     assert any(abs(float(charge.m)) > 1e-6 for charge in charges)
+
+
+def test_sage_labels_develop_mbuild_polymer_bonds():
+    """mBuild path bonds with unspecified order are normalized for OpenFF."""
+
+    pytest.importorskip("mbuild")
+    chain = build_chain("pe", degree=4)
+    chain.box = pytest.importorskip("mbuild").Box(lengths=[5, 5, 5])
+
+    parameters = parameterize_all_atom(chain)
+
+    assert len(parameters.bonds) == chain.n_bonds
