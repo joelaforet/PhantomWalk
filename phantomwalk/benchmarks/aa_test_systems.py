@@ -66,7 +66,7 @@ def build_chain(
         constraint = CuboidConstraint(box_length, pbc=(True, True, True))
     path = hard_sphere_random_walk(
         termination=degree,
-        bond_length=0.5,
+        bond_length=0.30,
         radius=0.05,
         seed=seed,
         volume_constraint=constraint,
@@ -165,6 +165,43 @@ def write_visualization_pdb(compound: Any, path: Path) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def minimum_nonbonded_distance_a(compound: Any) -> float:
+    """Return the closest periodic distance excluding 1-2, 1-3, and 1-4 pairs."""
+
+    from scipy.spatial import cKDTree
+
+    particles = list(compound.particles())
+    particle_index = {particle: index for index, particle in enumerate(particles)}
+    adjacency = [set() for _ in particles]
+    for first, second in compound.bonds():
+        i, j = particle_index[first], particle_index[second]
+        adjacency[i].add(j)
+        adjacency[j].add(i)
+    excluded = []
+    for atom in range(len(particles)):
+        seen = {atom}
+        frontier = {atom}
+        for _ in range(3):
+            frontier = {neighbor for current in frontier for neighbor in adjacency[current]} - seen
+            seen.update(frontier)
+        excluded.append(seen)
+
+    box = np.asarray(compound.box.lengths, dtype=float)
+    positions = np.asarray([particle.pos for particle in particles], dtype=float) % box
+    neighbor_count = min(64, len(particles))
+    distances, neighbors = cKDTree(positions, boxsize=box).query(
+        positions,
+        k=neighbor_count,
+    )
+    closest = np.inf
+    for atom in range(len(particles)):
+        for distance, neighbor in zip(distances[atom, 1:], neighbors[atom, 1:]):
+            if int(neighbor) not in excluded[atom]:
+                closest = min(closest, float(distance))
+                break
+    return closest * 10.0
+
+
 def _base36(value: int) -> str:
     """Return a compact base-36 identifier for a non-negative integer."""
 
@@ -215,6 +252,7 @@ def run_matrix(
                         actual_atoms=compound.n_particles,
                         seed=seed,
                         construction_s=construction_s,
+                        minimum_nonbonded_distance_a=minimum_nonbonded_distance_a(compound),
                         **asdict(result),
                     )
                     if seed == 11:

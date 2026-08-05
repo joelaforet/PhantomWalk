@@ -21,7 +21,7 @@ class AllAtomFastFIRESettings:
     gamma: float = 1_500.0
     r_cut: float = 1.01
     kT: float = 1.0
-    dt: float = 0.001
+    dt: float = 0.0001
     dpd_steps: int = 500
     fire_steps: int = 200
     seed: int = 1234

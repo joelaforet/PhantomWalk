@@ -18,7 +18,9 @@ The all-atom workflow labels an explicit-hydrogen mBuild `Compound` with OpenFF
 Sage 2.3.0. It divides energies and lengths by the largest labeled vdW epsilon
 and sigma, then runs 500 DPD steps and 200 FIRE steps with the paper defaults:
 `A = 250000`, uniform bond `k = 250000`, `gamma = 1500`, and `r_cut = 1.01`.
-Sage angles and torsions are retained in reduced units.
+Sage angles and torsions are retained in reduced units. The all-atom timestep is
+`0.0001`; explicit-hydrogen melts have substantially higher reduced number
+density than the bead systems for which `0.001` is stable.
 
 ``` python
 from phantomwalk.lib.all_atom import create_openmm_handoff
