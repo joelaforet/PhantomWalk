@@ -22,6 +22,8 @@ class AllAtomFastFIRESettings:
     force_field: str = "openff-2.3.0.offxml"
     repulsion: float = 250_000.0
     bond_k: float = 250_000.0
+    bonded_parameterization: str = "openff_scaled"
+    bonded_target_k: float = 250_000.0
     bonded_scale: float = 30.0
     gamma: float = 1_500.0
     r_cut: float = 1.01
@@ -97,6 +99,28 @@ def _forces(
     parameters: AllAtomParameters,
     settings: AllAtomFastFIRESettings,
 ) -> list[Any]:
+    if settings.bonded_parameterization not in {
+        "openff_scaled",
+        "uniform",
+        "class_normalized",
+    }:
+        raise ValueError(
+            "bonded_parameterization must be 'openff_scaled', 'uniform', or "
+            "'class_normalized'"
+        )
+
+    def scaled_k(values: dict[str, dict[str, float]], name: str) -> float:
+        if settings.bonded_parameterization == "uniform":
+            return settings.bonded_target_k
+        reduced = values[name]["k"] / parameters.epsilon_ref_kcal_mol
+        if settings.bonded_parameterization == "class_normalized":
+            largest = max(
+                value["k"] / parameters.epsilon_ref_kcal_mol
+                for value in values.values()
+            )
+            return settings.bonded_target_k * reduced / largest
+        return settings.bonded_scale * reduced
+
     forces = []
     if parameters.bonds:
         force = hoomd.md.bond.Harmonic()
@@ -107,9 +131,7 @@ def _forces(
         force = hoomd.md.angle.Harmonic()
         for name, values in parameters.angle_params.items():
             force.params[name] = {
-                "k": settings.bonded_scale
-                * values["k"]
-                / parameters.epsilon_ref_kcal_mol,
+                "k": scaled_k(parameters.angle_params, name),
                 "t0": values["t0"],
             }
         forces.append(force)
@@ -118,9 +140,7 @@ def _forces(
         for name, values in parameters.dihedral_params.items():
             force.params[name] = {
                 **values,
-                "k": settings.bonded_scale
-                * values["k"]
-                / parameters.epsilon_ref_kcal_mol,
+                "k": scaled_k(parameters.dihedral_params, name),
             }
         forces.append(force)
     if parameters.impropers:
@@ -128,9 +148,7 @@ def _forces(
         for name, values in parameters.improper_params.items():
             force.params[name] = {
                 **values,
-                "k": settings.bonded_scale
-                * values["k"]
-                / parameters.epsilon_ref_kcal_mol,
+                "k": scaled_k(parameters.improper_params, name),
             }
         forces.append(force)
     nlist = hoomd.md.nlist.Cell(buffer=0.4, exclusions=settings.nlist_exclusions)
