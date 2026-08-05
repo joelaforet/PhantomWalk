@@ -19,6 +19,11 @@ SYSTEM_DENSITIES = {
     "p3ht": (0.2, 0.8, 1.1),
     "pes": (0.2, 0.8, 1.3),
 }
+MONOMER_RESNAMES = {
+    "pe": ("PE",),
+    "p3ht": ("P3H",),
+    "pes": ("BPA", "BPS"),
+}
 
 
 def _tagged_monomers(system: str) -> tuple[list[str], str]:
@@ -52,8 +57,9 @@ def build_chain(
     if degree % len(sequence):
         raise ValueError(f"degree must be divisible by the {len(sequence)}-unit sequence")
     polymer = mb.Polymer()
-    for monomer_smiles in smiles:
+    for monomer_smiles, residue_name in zip(smiles, MONOMER_RESNAMES[system]):
         monomer = mb.load(monomer_smiles, smiles=True)
+        monomer.name = residue_name
         polymer.add_monomer(monomer, head_tag="<", tail_tag=">", separation=0.15)
     constraint = None
     if box_length is not None:
@@ -101,17 +107,39 @@ def _completed_keys(path: Path) -> set[tuple[Any, ...]]:
     return keys
 
 
-def run_matrix(output: Path, device: str = "auto") -> None:
+def write_visualization_pdb(compound: Any, path: Path) -> None:
+    """Write a PDB in which each mBuild monomer is a separate residue."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    compound.save(
+        str(path),
+        overwrite=True,
+        residues=sorted({name for names in MONOMER_RESNAMES.values() for name in names}),
+    )
+
+
+def run_matrix(
+    output: Path,
+    device: str = "auto",
+    structures_dir: Path | None = None,
+) -> None:
     """Run the restartable three-chemistry benchmark matrix as JSON Lines."""
 
     completed = _completed_keys(output)
+    structures_dir = structures_dir or output.with_suffix("").with_name(
+        f"{output.stem}_structures"
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     for system, densities in SYSTEM_DENSITIES.items():
         for density in densities:
             for target_atoms in (10_000, 20_000, 40_000, 80_000):
                 for seed in (11, 22, 33, 44, 55):
                     key = (system, density, target_atoms, seed)
-                    if key in completed:
+                    pdb_path = structures_dir / (
+                        f"{system}_rho{density:g}_n{target_atoms}_seed{seed}.pdb"
+                    )
+                    needs_structure = seed == 11 and not pdb_path.exists()
+                    if key in completed and not needs_structure:
                         continue
                     construction_start = time.perf_counter()
                     compound = build_test_system(system, density, target_atoms, seed=seed)
@@ -129,6 +157,11 @@ def run_matrix(output: Path, device: str = "auto") -> None:
                         construction_s=construction_s,
                         **asdict(result),
                     )
+                    if seed == 11:
+                        write_visualization_pdb(compound, pdb_path)
+                    if key in completed:
+                        print(json.dumps({"structure_backfill": str(pdb_path)}), flush=True)
+                        continue
                     with output.open("a") as handle:
                         handle.write(json.dumps(row) + "\n")
                     print(json.dumps(row), flush=True)
@@ -138,8 +171,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("aa_fastfire_results.jsonl"))
     parser.add_argument("--device", choices=("auto", "CPU", "GPU"), default="auto")
+    parser.add_argument("--structures-dir", type=Path)
     args = parser.parse_args()
-    run_matrix(args.output, args.device)
+    run_matrix(args.output, args.device, args.structures_dir)
 
 
 if __name__ == "__main__":
