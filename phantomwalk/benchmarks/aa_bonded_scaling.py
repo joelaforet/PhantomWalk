@@ -49,69 +49,55 @@ def run_experiment(output: Path, structures_dir: Path, target_atoms: int) -> Non
         density = max(densities)
         for mode in ("uniform", "class_normalized"):
             started = time.perf_counter()
-            try:
-                row = _run_case(
-                    system, density, target_atoms, mode, structures_dir, started
-                )
-            except Exception as error:
-                row = {
-                    "system": system,
-                    "density_g_cm3": density,
-                    "target_atoms": target_atoms,
-                    "mode": mode,
-                    "stable": False,
-                    "error_type": type(error).__name__,
-                    "error": str(error).splitlines()[0],
-                    "total_s": time.perf_counter() - started,
-                }
+            compound = build_test_system(system, density, target_atoms, seed=11)
+            parameters = parameterize_all_atom(compound)
+            interchange = create_interchange(compound)
+            result = run_all_atom_fastfire(
+                compound,
+                AllAtomFastFIRESettings(
+                    bonded_parameterization=mode,
+                    device="CPU",
+                    seed=11,
+                ),
+                interchange=interchange,
+            )
+            fastfire_geometry = _bond_geometry(compound, parameters)
+            fastfire_distance = minimum_nonbonded_distance_a(compound)
+            stem = f"{system}_rho{density:g}_n{target_atoms}_{mode}"
+            write_visualization_pdb(
+                compound, structures_dir / f"{stem}_fastfire.pdb"
+            )
+            minimization = minimize_interchange(interchange)
+            update_compound_positions(compound, interchange)
+            minimized_geometry = _bond_geometry(compound, parameters)
+            write_visualization_pdb(
+                compound, structures_dir / f"{stem}_minimized.pdb"
+            )
+            row = {
+                "system": system,
+                "density_g_cm3": density,
+                "target_atoms": target_atoms,
+                "actual_atoms": compound.n_particles,
+                "mode": mode,
+                "fastfire_s": result.elapsed_s,
+                "fastfire_minimum_nonbonded_distance_a": fastfire_distance,
+                **{f"fastfire_{key}": value for key, value in fastfire_geometry.items()},
+                "openmm_initial_energy_kj_mol": minimization.initial_energy_kj_mol,
+                "openmm_minimized_energy_kj_mol": minimization.minimized_energy_kj_mol,
+                "openmm_minimization_s": minimization.elapsed_s,
+                "openmm_finite": minimization.finite,
+                "minimized_minimum_nonbonded_distance_a": (
+                    minimum_nonbonded_distance_a(compound)
+                ),
+                **{
+                    f"minimized_{key}": value
+                    for key, value in minimized_geometry.items()
+                },
+                "total_s": time.perf_counter() - started,
+            }
             with output.open("a") as handle:
                 handle.write(json.dumps(row) + "\n")
             print(json.dumps(row), flush=True)
-
-
-def _run_case(system, density, target_atoms, mode, structures_dir, started):
-    """Run and summarize one scaling-policy state point."""
-
-    compound = build_test_system(system, density, target_atoms, seed=11)
-    parameters = parameterize_all_atom(compound)
-    interchange = create_interchange(compound)
-    result = run_all_atom_fastfire(
-        compound,
-        AllAtomFastFIRESettings(
-            bonded_parameterization=mode,
-            device="CPU",
-            seed=11,
-        ),
-        interchange=interchange,
-    )
-    fastfire_geometry = _bond_geometry(compound, parameters)
-    fastfire_distance = minimum_nonbonded_distance_a(compound)
-    stem = f"{system}_rho{density:g}_n{target_atoms}_{mode}"
-    write_visualization_pdb(compound, structures_dir / f"{stem}_fastfire.pdb")
-    minimization = minimize_interchange(interchange)
-    update_compound_positions(compound, interchange)
-    minimized_geometry = _bond_geometry(compound, parameters)
-    write_visualization_pdb(compound, structures_dir / f"{stem}_minimized.pdb")
-    return {
-        "system": system,
-        "density_g_cm3": density,
-        "target_atoms": target_atoms,
-        "actual_atoms": compound.n_particles,
-        "mode": mode,
-        "stable": True,
-        "fastfire_s": result.elapsed_s,
-        "fastfire_minimum_nonbonded_distance_a": fastfire_distance,
-        **{f"fastfire_{key}": value for key, value in fastfire_geometry.items()},
-        "openmm_initial_energy_kj_mol": minimization.initial_energy_kj_mol,
-        "openmm_minimized_energy_kj_mol": minimization.minimized_energy_kj_mol,
-        "openmm_minimization_s": minimization.elapsed_s,
-        "openmm_finite": minimization.finite,
-        "minimized_minimum_nonbonded_distance_a": minimum_nonbonded_distance_a(
-            compound
-        ),
-        **{f"minimized_{key}": value for key, value in minimized_geometry.items()},
-        "total_s": time.perf_counter() - started,
-    }
 
 
 def main() -> None:
