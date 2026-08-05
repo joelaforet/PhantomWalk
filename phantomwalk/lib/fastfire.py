@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -20,19 +20,20 @@ class AllAtomFastFIRESettings:
     """Controls for the deliberately short all-atom FastFIRE protocol."""
 
     force_field: str = "openff-2.3.0.offxml"
-    repulsion: float = 250_000.0
+    repulsion: float = 25_000.0
     bond_k: float = 250_000.0
     bonded_scale: float = 30.0
-    gamma: float = 1_500.0
+    gamma: float = 800.0
     r_cut: float = 1.01
     kT: float = 1.0
     dt: float = 0.0001
-    dpd_steps: int = 500
+    dpd_steps: int = 1_000
     fire_steps: int = 200
     fire_interval: int = 200
     fire_max_steps: int = 10_000
     fire_force_tol: float = 1_000.0
     fire_energy_tol: float = 1_000.0
+    require_fire_convergence: bool = True
     seed: int = 1234
     device: str = "auto"
     nlist_exclusions: tuple[str, ...] = ("bond", "angle", "dihedral")
@@ -51,6 +52,9 @@ class AllAtomFastFIREResult:
     fire_s: float
     fire_steps: int
     fire_converged: bool
+    bonded_counts: dict[str, int] = field(default_factory=dict)
+    dpd_energies: dict[str, float] = field(default_factory=dict)
+    fire_energies: dict[str, float] = field(default_factory=dict)
 
     @property
     def elapsed_s(self) -> float:
@@ -158,6 +162,29 @@ def _forces(
     return forces
 
 
+def _force_energies(forces: list[Any]) -> dict[str, float]:
+    """Return energies grouped by their bonded or pair-force role."""
+
+    energies = {}
+    for force in forces:
+        module = force.__class__.__module__
+        name = force.__class__.__name__
+        if module.endswith(".bond") or ".bond." in module:
+            kind = "bond"
+        elif module.endswith(".angle") or ".angle." in module:
+            kind = "angle"
+        elif module.endswith(".dihedral") or ".dihedral." in module:
+            kind = "dihedral"
+        elif module.endswith(".improper") or ".improper." in module:
+            kind = "improper"
+        elif "DPD" in name:
+            kind = "pair"
+        else:
+            continue
+        energies[kind] = float(force.energy)
+    return energies
+
+
 def _unwrap(positions: np.ndarray, bonds: list[tuple[int, int]], box: np.ndarray) -> np.ndarray:
     adjacency = [[] for _ in positions]
     for first, second in bonds:
@@ -209,6 +236,7 @@ def run_all_atom_fastfire(
     )
     setup = time.perf_counter()
     simulation.run(settings.dpd_steps)
+    dpd_energies = _force_energies(forces)
     dpd_done = time.perf_counter()
     fire = hoomd.md.minimize.FIRE(
         dt=settings.dt,
@@ -226,7 +254,8 @@ def run_all_atom_fastfire(
         simulation.run(interval)
         fire_steps += interval
     fire_done = time.perf_counter()
-    if not fire.converged:
+    fire_energies = _force_energies(fire_forces)
+    if settings.require_fire_convergence and not fire.converged:
         raise RuntimeError(
             f"FIRE did not converge within {settings.fire_max_steps} steps"
         )
@@ -249,4 +278,12 @@ def run_all_atom_fastfire(
         fire_s=fire_done - dpd_done,
         fire_steps=fire_steps,
         fire_converged=bool(fire.converged),
+        bonded_counts={
+            "bond": len(parameters.bonds),
+            "angle": len(parameters.angles),
+            "dihedral": len(parameters.dihedrals),
+            "improper": len(parameters.impropers),
+        },
+        dpd_energies=dpd_energies,
+        fire_energies=fire_energies,
     )
