@@ -91,6 +91,8 @@ def run_sweep(
                             device="CPU",
                             seed=seed,
                             dpd_steps=n_dpd,
+                            dpd_max_steps=n_dpd,
+                            require_dpd_convergence=False,
                             fire_steps=n_fire,
                             fire_max_steps=n_fire,
                             require_fire_convergence=False,

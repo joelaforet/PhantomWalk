@@ -27,8 +27,13 @@ class AllAtomFastFIRESettings:
     r_cut: float = 1.01
     kT: float = 1.0
     dt: float = 0.0001
-    dpd_steps: int = 1_000
-    fire_steps: int = 200
+    dpd_steps: int = 2_000
+    dpd_interval: int = 250
+    dpd_max_steps: int = 10_000
+    dpd_energy_tol: float = 0.02
+    dpd_consecutive_checks: int = 2
+    require_dpd_convergence: bool = True
+    fire_steps: int = 100
     fire_interval: int = 200
     fire_max_steps: int = 10_000
     fire_force_tol: float = 1_000.0
@@ -49,10 +54,13 @@ class AllAtomFastFIREResult:
     parameterization_s: float
     setup_s: float
     dpd_s: float
+    dpd_steps: int
+    dpd_converged: bool
     fire_s: float
     fire_steps: int
     fire_converged: bool
     bonded_counts: dict[str, int] = field(default_factory=dict)
+    dpd_energy_history: list[dict[str, float]] = field(default_factory=list)
     dpd_energies: dict[str, float] = field(default_factory=dict)
     fire_energies: dict[str, float] = field(default_factory=dict)
 
@@ -185,6 +193,30 @@ def _force_energies(forces: list[Any]) -> dict[str, float]:
     return energies
 
 
+def _intensive_energies(
+    energies: dict[str, float],
+    n_particles: int,
+    bonded_counts: dict[str, int],
+) -> dict[str, float]:
+    """Normalize force energies by particles or bonded interactions."""
+
+    return {
+        kind: energy / max(1, n_particles if kind == "pair" else bonded_counts[kind])
+        for kind, energy in energies.items()
+    }
+
+
+def _energies_converged(
+    previous: dict[str, float], current: dict[str, float], tolerance: float
+) -> bool:
+    """Return whether every intensive force energy changed by at most tolerance."""
+
+    return all(
+        abs(current[kind] - previous[kind]) / max(1.0, abs(previous[kind])) <= tolerance
+        for kind in current
+    )
+
+
 def _unwrap(positions: np.ndarray, bonds: list[tuple[int, int]], box: np.ndarray) -> np.ndarray:
     adjacency = [[] for _ in positions]
     for first, second in bonds:
@@ -236,7 +268,40 @@ def run_all_atom_fastfire(
     )
     setup = time.perf_counter()
     simulation.run(settings.dpd_steps)
+    dpd_steps = settings.dpd_steps
+    bonded_counts = {
+        "bond": len(parameters.bonds),
+        "angle": len(parameters.angles),
+        "dihedral": len(parameters.dihedrals),
+        "improper": len(parameters.impropers),
+    }
     dpd_energies = _force_energies(forces)
+    previous = _intensive_energies(
+        dpd_energies, len(parameters.positions_a), bonded_counts
+    )
+    dpd_energy_history = [{"step": float(dpd_steps), **previous}]
+    stable_checks = 0
+    while dpd_steps < settings.dpd_max_steps:
+        interval = min(settings.dpd_interval, settings.dpd_max_steps - dpd_steps)
+        simulation.run(interval)
+        dpd_steps += interval
+        dpd_energies = _force_energies(forces)
+        current = _intensive_energies(
+            dpd_energies, len(parameters.positions_a), bonded_counts
+        )
+        dpd_energy_history.append({"step": float(dpd_steps), **current})
+        if _energies_converged(previous, current, settings.dpd_energy_tol):
+            stable_checks += 1
+            if stable_checks >= settings.dpd_consecutive_checks:
+                break
+        else:
+            stable_checks = 0
+        previous = current
+    dpd_converged = stable_checks >= settings.dpd_consecutive_checks
+    if settings.require_dpd_convergence and not dpd_converged:
+        raise RuntimeError(
+            f"DPD energies did not converge within {settings.dpd_max_steps} steps"
+        )
     dpd_done = time.perf_counter()
     fire = hoomd.md.minimize.FIRE(
         dt=settings.dt,
@@ -275,15 +340,13 @@ def run_all_atom_fastfire(
         parameterization_s=parameterized - started,
         setup_s=setup - parameterized,
         dpd_s=dpd_done - setup,
+        dpd_steps=dpd_steps,
+        dpd_converged=dpd_converged,
         fire_s=fire_done - dpd_done,
         fire_steps=fire_steps,
         fire_converged=bool(fire.converged),
-        bonded_counts={
-            "bond": len(parameters.bonds),
-            "angle": len(parameters.angles),
-            "dihedral": len(parameters.dihedrals),
-            "improper": len(parameters.impropers),
-        },
+        bonded_counts=bonded_counts,
+        dpd_energy_history=dpd_energy_history,
         dpd_energies=dpd_energies,
         fire_energies=fire_energies,
     )
