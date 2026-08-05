@@ -177,28 +177,59 @@ def minimum_nonbonded_distance_a(compound: Any) -> float:
         i, j = particle_index[first], particle_index[second]
         adjacency[i].add(j)
         adjacency[j].add(i)
-    excluded = []
+    excluded_codes = []
+    n_particles = len(particles)
     for atom in range(len(particles)):
         seen = {atom}
         frontier = {atom}
         for _ in range(3):
             frontier = {neighbor for current in frontier for neighbor in adjacency[current]} - seen
             seen.update(frontier)
-        excluded.append(seen)
+        excluded_codes.extend(
+            min(atom, neighbor) * n_particles + max(atom, neighbor)
+            for neighbor in seen
+            if neighbor != atom
+        )
+    excluded_codes = np.unique(np.asarray(excluded_codes, dtype=np.int64))
 
     box = np.asarray(compound.box.lengths, dtype=float)
     positions = np.asarray([particle.pos for particle in particles], dtype=float) % box
-    neighbor_count = min(64, len(particles))
-    distances, neighbors = cKDTree(positions, boxsize=box).query(
-        positions,
-        k=neighbor_count,
-    )
+    tree = cKDTree(positions, boxsize=box)
     closest = np.inf
-    for atom in range(len(particles)):
-        for distance, neighbor in zip(distances[atom, 1:], neighbors[atom, 1:]):
-            if int(neighbor) not in excluded[atom]:
-                closest = min(closest, float(distance))
-                break
+    neighbor_count = min(32, n_particles)
+    chunk_size = 10_000
+    for start in range(0, n_particles, chunk_size):
+        stop = min(start + chunk_size, n_particles)
+        distances, neighbors = tree.query(
+            positions[start:stop],
+            k=neighbor_count,
+            workers=-1,
+        )
+        atoms = np.arange(start, stop, dtype=np.int64)[:, None]
+        candidate_codes = (
+            np.minimum(atoms, neighbors) * n_particles + np.maximum(atoms, neighbors)
+        )
+        valid = ~np.isin(candidate_codes, excluded_codes, assume_unique=False)
+        valid[:, 0] = False
+        if np.any(valid):
+            closest = min(closest, float(np.min(distances[valid])))
+        unresolved = ~np.any(valid, axis=1)
+        if np.any(unresolved) and neighbor_count < n_particles:
+            extra_distances, extra_neighbors = tree.query(
+                positions[start:stop][unresolved],
+                k=min(128, n_particles),
+                workers=-1,
+            )
+            extra_atoms = atoms[unresolved]
+            extra_codes = (
+                np.minimum(extra_atoms, extra_neighbors) * n_particles
+                + np.maximum(extra_atoms, extra_neighbors)
+            )
+            extra_valid = ~np.isin(extra_codes, excluded_codes, assume_unique=False)
+            extra_valid[:, 0] = False
+            if not np.all(np.any(extra_valid, axis=1)):
+                raise RuntimeError("could not locate a nonexcluded neighbor for every atom")
+            closest = min(closest, float(np.min(extra_distances[extra_valid])))
     return closest * 10.0
 
 
