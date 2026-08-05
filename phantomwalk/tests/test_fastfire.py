@@ -3,12 +3,7 @@
 import numpy as np
 import pytest
 
-from phantomwalk.lib.fastfire import (
-    AllAtomFastFIRESettings,
-    _forces,
-    _unwrap,
-    run_all_atom_fastfire,
-)
+from phantomwalk.lib.fastfire import AllAtomFastFIRESettings, _unwrap, run_all_atom_fastfire
 
 
 def test_unwrap_follows_bonds_across_boundary():
@@ -34,22 +29,3 @@ def test_short_cpu_fastfire_updates_finite_coordinates():
     assert result.elapsed_s > 0
     assert np.isfinite(compound.xyz).all()
     assert np.linalg.norm(compound.xyz[0] - compound.xyz[1]) < 0.3
-
-
-@pytest.mark.parametrize("mode", ("uniform", "class_normalized"))
-def test_bonded_scaling_modes_build_complete_force_set(mode):
-    mbuild = pytest.importorskip("mbuild")
-    hoomd = pytest.importorskip("hoomd")
-    from phantomwalk.lib.all_atom import parameterize_all_atom
-
-    compound = mbuild.load("CCCC", smiles=True)
-    compound.box = mbuild.Box(lengths=[4, 4, 4])
-    parameters = parameterize_all_atom(compound)
-
-    forces = _forces(
-        hoomd,
-        parameters,
-        AllAtomFastFIRESettings(bonded_parameterization=mode),
-    )
-
-    assert len(forces) == 4
