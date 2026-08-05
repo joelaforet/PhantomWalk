@@ -22,10 +22,18 @@ def test_short_cpu_fastfire_updates_finite_coordinates():
 
     result = run_all_atom_fastfire(
         compound,
-        AllAtomFastFIRESettings(dpd_steps=1, fire_steps=1, device="CPU"),
+        AllAtomFastFIRESettings(
+            dpd_steps=1,
+            fire_steps=1,
+            fire_interval=100,
+            fire_max_steps=1_000,
+            device="CPU",
+        ),
     )
 
     assert result.n_particles == 8
     assert result.elapsed_s > 0
+    assert result.fire_converged
+    assert result.fire_steps <= 1_000
     assert np.isfinite(compound.xyz).all()
     assert np.linalg.norm(compound.xyz[0] - compound.xyz[1]) < 0.3

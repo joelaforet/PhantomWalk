@@ -29,6 +29,10 @@ class AllAtomFastFIRESettings:
     dt: float = 0.0001
     dpd_steps: int = 500
     fire_steps: int = 200
+    fire_interval: int = 200
+    fire_max_steps: int = 10_000
+    fire_force_tol: float = 1_000.0
+    fire_energy_tol: float = 1_000.0
     seed: int = 1234
     device: str = "auto"
     nlist_exclusions: tuple[str, ...] = ("bond", "angle", "dihedral")
@@ -45,6 +49,8 @@ class AllAtomFastFIREResult:
     setup_s: float
     dpd_s: float
     fire_s: float
+    fire_steps: int
+    fire_converged: bool
 
     @property
     def elapsed_s(self) -> float:
@@ -96,6 +102,7 @@ def _forces(
     hoomd: Any,
     parameters: AllAtomParameters,
     settings: AllAtomFastFIRESettings,
+    conservative_dpd: bool = False,
 ) -> list[Any]:
     forces = []
     if parameters.bonds:
@@ -134,8 +141,19 @@ def _forces(
             }
         forces.append(force)
     nlist = hoomd.md.nlist.Cell(buffer=0.4, exclusions=settings.nlist_exclusions)
-    dpd = hoomd.md.pair.DPD(nlist, default_r_cut=settings.r_cut, kT=settings.kT)
-    dpd.params[("A", "A")] = {"A": settings.repulsion, "gamma": settings.gamma}
+    if conservative_dpd:
+        dpd = hoomd.md.pair.DPDConservative(
+            nlist, default_r_cut=settings.r_cut
+        )
+        dpd.params[("A", "A")] = {"A": settings.repulsion}
+    else:
+        dpd = hoomd.md.pair.DPD(
+            nlist, default_r_cut=settings.r_cut, kT=settings.kT
+        )
+        dpd.params[("A", "A")] = {
+            "A": settings.repulsion,
+            "gamma": settings.gamma,
+        }
     forces.append(dpd)
     return forces
 
@@ -170,7 +188,7 @@ def run_all_atom_fastfire(
     settings: AllAtomFastFIRESettings | None = None,
     interchange: Any | None = None,
 ) -> AllAtomFastFIREResult:
-    """Run 500 DPD steps followed by 200 FIRE steps and update ``compound``."""
+    """Run DPD followed by FIRE to convergence and update ``compound``."""
 
     import hoomd
 
@@ -180,6 +198,7 @@ def run_all_atom_fastfire(
     parameterized = time.perf_counter()
     frame = _frame(parameters)
     forces = _forces(hoomd, parameters, settings)
+    fire_forces = _forces(hoomd, parameters, settings, conservative_dpd=True)
     method = hoomd.md.methods.ConstantVolume(filter=hoomd.filter.All())
     simulation = hoomd.Simulation(device=_device(hoomd, settings.device), seed=settings.seed)
     simulation.create_state_from_snapshot(frame)
@@ -191,16 +210,26 @@ def run_all_atom_fastfire(
     setup = time.perf_counter()
     simulation.run(settings.dpd_steps)
     dpd_done = time.perf_counter()
-    simulation.operations.integrator = hoomd.md.minimize.FIRE(
+    fire = hoomd.md.minimize.FIRE(
         dt=settings.dt,
-        force_tol=0.1,
+        force_tol=settings.fire_force_tol,
         angmom_tol=1000.0,
-        energy_tol=0.1,
-        forces=forces,
+        energy_tol=settings.fire_energy_tol,
+        forces=fire_forces,
         methods=[method],
     )
+    simulation.operations.integrator = fire
     simulation.run(settings.fire_steps)
+    fire_steps = settings.fire_steps
+    while not fire.converged and fire_steps < settings.fire_max_steps:
+        interval = min(settings.fire_interval, settings.fire_max_steps - fire_steps)
+        simulation.run(interval)
+        fire_steps += interval
     fire_done = time.perf_counter()
+    if not fire.converged:
+        raise RuntimeError(
+            f"FIRE did not converge within {settings.fire_max_steps} steps"
+        )
 
     snapshot = simulation.state.get_snapshot()
     if snapshot.communicator.rank == 0:
@@ -218,4 +247,6 @@ def run_all_atom_fastfire(
         setup_s=setup - parameterized,
         dpd_s=dpd_done - setup,
         fire_s=fire_done - dpd_done,
+        fire_steps=fire_steps,
+        fire_converged=bool(fire.converged),
     )
