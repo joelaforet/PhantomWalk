@@ -319,6 +319,7 @@ def run_matrix(
                             minimization.minimized_energy_kj_mol
                         ),
                         openmm_minimization_s=minimization.elapsed_s,
+                        openmm_platform=minimization.platform_name,
                         **asdict(result),
                     )
                     if seed == 11:

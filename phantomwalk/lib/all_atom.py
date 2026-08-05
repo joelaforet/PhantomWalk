@@ -41,6 +41,7 @@ class OpenMMMinimizationResult:
     minimized_energy_kj_mol: float
     elapsed_s: float
     finite: bool
+    platform_name: str
 
 
 def _openff_indices(key: Any) -> tuple[int, ...]:
@@ -218,7 +219,7 @@ def create_openmm_handoff(
 def minimize_interchange(
     interchange: Any,
     max_iterations: int = 0,
-    platform_name: str = "CPU",
+    platform_name: str = "auto",
 ) -> OpenMMMinimizationResult:
     """Minimize an Interchange in OpenMM and retain the minimized coordinates.
 
@@ -236,8 +237,20 @@ def minimize_interchange(
     started = time.perf_counter()
     system = interchange.to_openmm_system()
     integrator = openmm.VerletIntegrator(0.0001 * openmm_unit.picoseconds)
-    platform = openmm.Platform.getPlatformByName(platform_name)
-    context = openmm.Context(system, integrator, platform)
+    available = {
+        openmm.Platform.getPlatform(index).getName()
+        for index in range(openmm.Platform.getNumPlatforms())
+    }
+    selected_name = (
+        "CUDA"
+        if platform_name == "auto" and "CUDA" in available
+        else platform_name
+    )
+    if selected_name == "auto":
+        selected_name = "CPU"
+    platform = openmm.Platform.getPlatformByName(selected_name)
+    properties = {"Precision": "mixed"} if selected_name == "CUDA" else {}
+    context = openmm.Context(system, integrator, platform, properties)
     context.setPositions(interchange.positions.to_openmm())
     initial_state = context.getState(getEnergy=True)
     initial_energy = initial_state.getPotentialEnergy().value_in_unit(
@@ -259,6 +272,7 @@ def minimize_interchange(
         minimized_energy_kj_mol=float(minimized_energy),
         elapsed_s=time.perf_counter() - started,
         finite=finite,
+        platform_name=selected_name,
     )
 
 

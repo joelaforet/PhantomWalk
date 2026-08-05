@@ -99,8 +99,11 @@ def test_openmm_minimizes_same_interchange_in_memory():
     interchange = create_interchange(compound)
     initial_positions = interchange.positions.copy()
 
-    result = minimize_interchange(interchange, max_iterations=20)
+    result = minimize_interchange(
+        interchange, max_iterations=20, platform_name="CPU"
+    )
 
     assert result.finite
     assert result.minimized_energy_kj_mol <= result.initial_energy_kj_mol
+    assert result.platform_name == "CPU"
     assert not np.allclose(interchange.positions, initial_positions)
