@@ -108,14 +108,74 @@ def _completed_keys(path: Path) -> set[tuple[Any, ...]]:
 
 
 def write_visualization_pdb(compound: Any, path: Path) -> None:
-    """Write a PDB in which each mBuild monomer is a separate residue."""
+    """Write a PDB with unique segments and one residue per mBuild monomer."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    compound.save(
-        str(path),
-        overwrite=True,
-        residues=sorted({name for names in MONOMER_RESNAMES.values() for name in names}),
-    )
+    particles = list(compound.particles())
+    if len(particles) > 99_999:
+        raise ValueError("legacy PDB atom serials support at most 99,999 atoms")
+    particle_index = {particle: index + 1 for index, particle in enumerate(particles)}
+    chains = [child for child in compound.children if child.name == "Polymer"]
+    if compound.name == "Polymer":
+        chains = [compound]
+    elif not chains or sum(chain.n_particles for chain in chains) != len(particles):
+        chains = [compound]
+
+    atom_locations: dict[Any, tuple[str, int, str]] = {}
+    segment_index = 0
+    for chain in chains:
+        monomers = list(chain.children)
+        if not monomers or sum(monomer.n_particles for monomer in monomers) != chain.n_particles:
+            monomers = [chain]
+        for monomer_index, monomer in enumerate(monomers):
+            if monomer_index and monomer_index % 9_999 == 0:
+                segment_index += 1
+            encoded_segment = _base36(segment_index)
+            if len(encoded_segment) > 4:
+                raise ValueError("legacy PDB segment IDs support at most 36^4 segments")
+            segment_id = encoded_segment.rjust(4, "0")
+            residue_id = monomer_index % 9_999 + 1
+            residue_name = str(monomer.name)[:3].upper()
+            for particle in monomer.particles():
+                atom_locations[particle] = (segment_id, residue_id, residue_name)
+        segment_index += 1
+
+    lengths_a = np.asarray(compound.box.lengths, dtype=float) * 10.0
+    lines = [
+        f"CRYST1{lengths_a[0]:9.3f}{lengths_a[1]:9.3f}{lengths_a[2]:9.3f}"
+        "  90.00  90.00  90.00 P 1           1"
+    ]
+    atom_counts: dict[tuple[str, int, str], dict[str, int]] = {}
+    for serial, particle in enumerate(particles, start=1):
+        segment_id, residue_id, residue_name = atom_locations[particle]
+        element = particle.element.symbol
+        location = (segment_id, residue_id, residue_name)
+        counts = atom_counts.setdefault(location, {})
+        counts[element] = counts.get(element, 0) + 1
+        atom_name = f"{element}{counts[element]}"[:4]
+        x, y, z = np.asarray(particle.xyz, dtype=float)[0] * 10.0
+        lines.append(
+            f"HETATM{serial:5d} {atom_name:<4s} {residue_name:>3s}  {residue_id:4d}    "
+            f"{x:8.3f}{y:8.3f}{z:8.3f}{1.0:6.2f}{0.0:6.2f}      "
+            f"{segment_id:<4s}{element:>2s}  "
+        )
+    for first, second in compound.bonds():
+        lines.append(f"CONECT{particle_index[first]:5d}{particle_index[second]:5d}")
+    lines.append("END")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _base36(value: int) -> str:
+    """Return a compact base-36 identifier for a non-negative integer."""
+
+    digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if value < 0:
+        raise ValueError("base-36 identifiers require non-negative integers")
+    output = ""
+    while value:
+        value, remainder = divmod(value, 36)
+        output = digits[remainder] + output
+    return output or "0"
 
 
 def run_matrix(

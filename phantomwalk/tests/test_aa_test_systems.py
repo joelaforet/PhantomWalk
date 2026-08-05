@@ -4,7 +4,9 @@ import pytest
 
 from phantomwalk.benchmarks.aa_test_systems import (
     SYSTEM_DENSITIES,
+    _base36,
     build_chain,
+    build_test_system,
     write_visualization_pdb,
 )
 
@@ -28,8 +30,25 @@ def test_visualization_pdb_assigns_one_residue_per_monomer(tmp_path):
     write_visualization_pdb(chain, path)
 
     residue_ids = {
-        line[22:26].strip()
+        (line[72:76].strip(), line[22:26].strip())
         for line in path.read_text().splitlines()
         if line.startswith(("ATOM", "HETATM"))
     }
     assert len(residue_ids) == 10
+
+
+def test_visualization_pdb_assigns_unique_polymer_segments(tmp_path):
+    pytest.importorskip("mbuild")
+    melt = build_test_system("pe", density_g_cm3=0.2, target_atoms=1_000, degree=10)
+    path = tmp_path / "melt.pdb"
+
+    write_visualization_pdb(melt, path)
+
+    segments = {
+        line[72:76].strip()
+        for line in path.read_text().splitlines()
+        if line.startswith("HETATM")
+    }
+    assert len(segments) == len(melt.children)
+    assert _base36(35) == "Z"
+    assert _base36(36) == "10"
