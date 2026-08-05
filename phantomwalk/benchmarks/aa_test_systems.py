@@ -11,6 +11,11 @@ from typing import Any
 
 import numpy as np
 
+from phantomwalk.lib.all_atom import (
+    create_interchange,
+    minimize_interchange,
+    update_compound_positions,
+)
 from phantomwalk.lib.fastfire import AllAtomFastFIRESettings, run_all_atom_fastfire
 
 AMU_NM3_TO_G_CM3 = 1.66053906660e-3
@@ -32,10 +37,10 @@ def _tagged_monomers(system: str) -> tuple[list[str], str]:
     if system == "pe":
         return ["C{<}C{>}"], "A"
     if system == "p3ht":
-        return ["c1{<}cc(sc1{>}CCCCCC)"], "A"
+        return ["c1{<}sc{>}c(CCCCCC)c1"], "A"
     if system == "pes":
-        bisphenol_a = "c1{<}ccc(C(C)(C)c2ccc({>}cc2))cc1"
-        diphenyl_sulfone = "O=S(=O)(c1{<}ccc(cc1))c1ccc({>}cc1)"
+        bisphenol_a = "CC(C)(c1ccc(O{<})cc1)c1ccc(O{>})cc1"
+        diphenyl_sulfone = "O=S(=O)(c1ccc(c{<}c1))c1ccc(c{>}c1)"
         # Three BPA and two BPS units give the requested 40:60 BPS:BPA ratio.
         return [bisphenol_a, diphenyl_sulfone], "AABAB"
     raise ValueError(f"unknown system {system!r}; choose from {tuple(SYSTEM_DENSITIES)}")
@@ -272,10 +277,29 @@ def run_matrix(
                     construction_start = time.perf_counter()
                     compound = build_test_system(system, density, target_atoms, seed=seed)
                     construction_s = time.perf_counter() - construction_start
+                    interchange_start = time.perf_counter()
+                    interchange = create_interchange(compound)
+                    interchange_s = time.perf_counter() - interchange_start
                     result = run_all_atom_fastfire(
                         compound,
                         AllAtomFastFIRESettings(seed=seed, device=device),
+                        interchange=interchange,
                     )
+                    fastfire_distance = minimum_nonbonded_distance_a(compound)
+                    fastfire_pdb_path = pdb_path.with_name(
+                        f"{pdb_path.stem}_fastfire.pdb"
+                    )
+                    if seed == 11:
+                        write_visualization_pdb(compound, fastfire_pdb_path)
+                    minimization = minimize_interchange(interchange)
+                    if not minimization.finite:
+                        raise RuntimeError(f"OpenMM returned non-finite energies for {key}")
+                    if (
+                        minimization.minimized_energy_kj_mol
+                        > minimization.initial_energy_kj_mol
+                    ):
+                        raise RuntimeError(f"OpenMM minimization increased the energy for {key}")
+                    update_compound_positions(compound, interchange)
                     row = dict(
                         system=system,
                         density_g_cm3=density,
@@ -283,7 +307,18 @@ def run_matrix(
                         actual_atoms=compound.n_particles,
                         seed=seed,
                         construction_s=construction_s,
-                        minimum_nonbonded_distance_a=minimum_nonbonded_distance_a(compound),
+                        interchange_s=interchange_s,
+                        fastfire_minimum_nonbonded_distance_a=fastfire_distance,
+                        minimized_minimum_nonbonded_distance_a=(
+                            minimum_nonbonded_distance_a(compound)
+                        ),
+                        openmm_initial_energy_kj_mol=(
+                            minimization.initial_energy_kj_mol
+                        ),
+                        openmm_minimized_energy_kj_mol=(
+                            minimization.minimized_energy_kj_mol
+                        ),
+                        openmm_minimization_s=minimization.elapsed_s,
                         **asdict(result),
                     )
                     if seed == 11:

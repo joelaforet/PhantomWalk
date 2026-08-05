@@ -3,7 +3,12 @@
 import numpy as np
 import pytest
 
-from phantomwalk.lib.all_atom import create_openmm_handoff, parameterize_all_atom
+from phantomwalk.lib.all_atom import (
+    create_interchange,
+    create_openmm_handoff,
+    minimize_interchange,
+    parameterize_all_atom,
+)
 from phantomwalk.benchmarks.aa_test_systems import build_chain
 
 
@@ -68,3 +73,34 @@ def test_sage_labels_develop_mbuild_polymer_bonds():
     parameters = parameterize_all_atom(chain)
 
     assert len(parameters.bonds) == chain.n_bonds
+
+
+@pytest.mark.parametrize("chemistry", ("p3ht", "pes"))
+def test_ashgc_parameterizes_aromatic_test_polymers(chemistry):
+    """Tagged aromatic repeat units remain closed-shell after polymerization."""
+
+    mbuild = pytest.importorskip("mbuild")
+    degree = 5 if chemistry == "pes" else 4
+    chain = build_chain(chemistry, degree=degree)
+    chain.box = mbuild.Box(lengths=[8, 8, 8])
+
+    interchange = create_interchange(chain)
+
+    assert len(interchange.collections["Electrostatics"].charges) == chain.n_particles
+
+
+def test_openmm_minimizes_same_interchange_in_memory():
+    """The handoff validation lowers energy and stores minimized coordinates."""
+
+    mbuild = pytest.importorskip("mbuild")
+    compound = mbuild.load("CC", smiles=True)
+    compound.translate([1.5, 1.5, 1.5])
+    compound.box = mbuild.Box(lengths=[3, 3, 3])
+    interchange = create_interchange(compound)
+    initial_positions = interchange.positions.copy()
+
+    result = minimize_interchange(interchange, max_iterations=20)
+
+    assert result.finite
+    assert result.minimized_energy_kj_mol <= result.initial_energy_kj_mol
+    assert not np.allclose(interchange.positions, initial_positions)

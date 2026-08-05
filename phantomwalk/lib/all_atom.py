@@ -33,6 +33,16 @@ class AllAtomParameters:
     sigma_ref_a: float = 0.0
 
 
+@dataclass(frozen=True)
+class OpenMMMinimizationResult:
+    """Energy and timing summary for an Interchange handoff validation."""
+
+    initial_energy_kj_mol: float
+    minimized_energy_kj_mol: float
+    elapsed_s: float
+    finite: bool
+
+
 def _openff_indices(key: Any) -> tuple[int, ...]:
     """Return atom indices from an OpenFF topology key."""
 
@@ -58,6 +68,7 @@ def compound_to_openff_molecule(compound: Any) -> Any:
     for bond in rdkit_molecule.GetBonds():
         if bond.GetBondType() == Chem.BondType.UNSPECIFIED:
             bond.SetBondType(Chem.BondType.SINGLE)
+    Chem.SanitizeMol(rdkit_molecule)
     molecule = Molecule.from_rdkit(
         rdkit_molecule,
         allow_undefined_stereo=True,
@@ -148,11 +159,11 @@ def parameterize_all_atom(
     return result
 
 
-def create_openmm_handoff(
+def create_interchange(
     compound: Any,
     force_field_name: str = "openff-2.3.0.offxml",
-) -> tuple[Any, Any]:
-    """Create an Interchange and OpenMM System with Sage 2.3 AshGC charges."""
+) -> Any:
+    """Create an in-memory Sage Interchange with AshGC charges."""
 
     from openff.interchange import Interchange
     from openff.toolkit import ForceField, Topology
@@ -163,13 +174,92 @@ def create_openmm_handoff(
     box = getattr(compound, "box", None)
     if box is None:
         raise ValueError("compound.box must define periodic box lengths")
-    interchange = Interchange.from_smirnoff(
+    return Interchange.from_smirnoff(
         ForceField(force_field_name),
         topology,
         box=np.diag(np.asarray(box.lengths, dtype=float)) * unit.nanometer,
-        positions=np.asarray(compound.xyz, dtype=float) * unit.nanometer,
+        positions=np.asarray(
+            [particle.pos for particle in compound.particles()],
+            dtype=float,
+        )
+        * unit.nanometer,
     )
+
+
+def update_interchange_positions(interchange: Any, compound: Any) -> None:
+    """Set Interchange positions directly from an initialized mBuild compound."""
+
+    from openff.units import unit
+
+    interchange.positions = (
+        np.asarray([particle.pos for particle in compound.particles()], dtype=float)
+        * unit.nanometer
+    )
+
+
+def update_compound_positions(compound: Any, interchange: Any) -> None:
+    """Set mBuild coordinates from the current Interchange positions."""
+
+    from openff.units import unit
+
+    compound.xyz = np.asarray(interchange.positions.m_as(unit.nanometer), dtype=float)
+
+
+def create_openmm_handoff(
+    compound: Any,
+    force_field_name: str = "openff-2.3.0.offxml",
+) -> tuple[Any, Any]:
+    """Create an Interchange and OpenMM System with Sage 2.3 AshGC charges."""
+
+    interchange = create_interchange(compound, force_field_name)
     return interchange, interchange.to_openmm_system()
+
+
+def minimize_interchange(
+    interchange: Any,
+    max_iterations: int = 0,
+    platform_name: str = "CPU",
+) -> OpenMMMinimizationResult:
+    """Minimize an Interchange in OpenMM and retain the minimized coordinates.
+
+    By default OpenMM runs until convergence; a positive iteration limit is
+    intended only for short diagnostic tests.
+    """
+
+    import time
+
+    import numpy as np
+    import openmm
+    from openmm import unit as openmm_unit
+    from openff.units.openmm import from_openmm
+
+    started = time.perf_counter()
+    system = interchange.to_openmm_system()
+    integrator = openmm.VerletIntegrator(0.0001 * openmm_unit.picoseconds)
+    platform = openmm.Platform.getPlatformByName(platform_name)
+    context = openmm.Context(system, integrator, platform)
+    context.setPositions(interchange.positions.to_openmm())
+    initial_state = context.getState(getEnergy=True)
+    initial_energy = initial_state.getPotentialEnergy().value_in_unit(
+        openmm_unit.kilojoule_per_mole
+    )
+    openmm.LocalEnergyMinimizer.minimize(
+        context,
+        tolerance=10.0,
+        maxIterations=max_iterations,
+    )
+    minimized_state = context.getState(getEnergy=True, getPositions=True)
+    minimized_energy = minimized_state.getPotentialEnergy().value_in_unit(
+        openmm_unit.kilojoule_per_mole
+    )
+    interchange.positions = from_openmm(minimized_state.getPositions(asNumpy=True))
+    finite = bool(np.isfinite(initial_energy) and np.isfinite(minimized_energy))
+    return OpenMMMinimizationResult(
+        initial_energy_kj_mol=float(initial_energy),
+        minimized_energy_kj_mol=float(minimized_energy),
+        elapsed_s=time.perf_counter() - started,
+        finite=finite,
+    )
 
 
 def _parameterize_children(

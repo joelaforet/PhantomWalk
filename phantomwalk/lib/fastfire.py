@@ -8,7 +8,11 @@ from typing import Any
 
 import numpy as np
 
-from phantomwalk.lib.all_atom import AllAtomParameters, parameterize_all_atom
+from phantomwalk.lib.all_atom import (
+    AllAtomParameters,
+    parameterize_all_atom,
+    update_interchange_positions,
+)
 
 
 @dataclass(frozen=True)
@@ -18,6 +22,7 @@ class AllAtomFastFIRESettings:
     force_field: str = "openff-2.3.0.offxml"
     repulsion: float = 250_000.0
     bond_k: float = 250_000.0
+    bonded_scale: float = 30.0
     gamma: float = 1_500.0
     r_cut: float = 1.01
     kT: float = 1.0
@@ -102,7 +107,9 @@ def _forces(
         force = hoomd.md.angle.Harmonic()
         for name, values in parameters.angle_params.items():
             force.params[name] = {
-                "k": values["k"] / parameters.epsilon_ref_kcal_mol,
+                "k": settings.bonded_scale
+                * values["k"]
+                / parameters.epsilon_ref_kcal_mol,
                 "t0": values["t0"],
             }
         forces.append(force)
@@ -111,7 +118,9 @@ def _forces(
         for name, values in parameters.dihedral_params.items():
             force.params[name] = {
                 **values,
-                "k": values["k"] / parameters.epsilon_ref_kcal_mol,
+                "k": settings.bonded_scale
+                * values["k"]
+                / parameters.epsilon_ref_kcal_mol,
             }
         forces.append(force)
     if parameters.impropers:
@@ -119,7 +128,9 @@ def _forces(
         for name, values in parameters.improper_params.items():
             force.params[name] = {
                 **values,
-                "k": values["k"] / parameters.epsilon_ref_kcal_mol,
+                "k": settings.bonded_scale
+                * values["k"]
+                / parameters.epsilon_ref_kcal_mol,
             }
         forces.append(force)
     nlist = hoomd.md.nlist.Cell(buffer=0.4, exclusions=settings.nlist_exclusions)
@@ -157,6 +168,7 @@ def _unwrap(positions: np.ndarray, bonds: list[tuple[int, int]], box: np.ndarray
 def run_all_atom_fastfire(
     compound: Any,
     settings: AllAtomFastFIRESettings | None = None,
+    interchange: Any | None = None,
 ) -> AllAtomFastFIREResult:
     """Run 500 DPD steps followed by 200 FIRE steps and update ``compound``."""
 
@@ -196,6 +208,8 @@ def run_all_atom_fastfire(
         box_reduced = parameters.box_lengths_a / parameters.sigma_ref_a
         reduced = _unwrap(reduced, parameters.bonds, box_reduced) + box_reduced / 2
         compound.xyz = reduced * parameters.sigma_ref_a / 10.0
+        if interchange is not None:
+            update_interchange_positions(interchange, compound)
     return AllAtomFastFIREResult(
         n_particles=len(parameters.positions_a),
         epsilon_ref_kcal_mol=parameters.epsilon_ref_kcal_mol,
