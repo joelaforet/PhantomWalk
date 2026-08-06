@@ -16,11 +16,18 @@ Build a software environment using the `environment.yml` file and the command ``
 
 The all-atom workflow labels an explicit-hydrogen mBuild `Compound` with OpenFF
 Sage 2.3.0. It divides energies and lengths by the largest labeled vdW epsilon
-and sigma, then runs 500 DPD steps and 200 FIRE steps with the paper defaults:
-`A = 250000`, uniform bond `k = 250000`, `gamma = 1500`, and `r_cut = 1.01`.
-Sage angles and torsions are retained in reduced units. The all-atom timestep is
-`0.0001`; explicit-hydrogen melts have substantially higher reduced number
-density than the bead systems for which `0.001` is stable.
+and sigma. The current adaptive protocol uses `A = 25000`, uniform bond
+`k = 250000`, `gamma = 800`, `r_cut = 1.01`, and a reduced timestep of
+`0.0001`. Sage angles, proper torsions, and impropers retain their relative
+strengths and are scaled by 30 after reduction by the reference epsilon.
+
+DPD runs for a 2,000-step baseline and then in 250-step extensions until every
+intensive bonded and pair energy changes by no more than 2% for two consecutive
+checks. FIRE then runs for at least 100 steps and continues to convergence when
+needed. The literal coarse-grained settings (`A = 250000`, `gamma = 1500`, and
+500 fixed DPD steps) were tested and rejected for dense all-atom systems. See
+[`benchmark_results/AA_DPD_STATUS_REPORT.md`](benchmark_results/AA_DPD_STATUS_REPORT.md)
+for the evidence and current limitations.
 
 ``` python
 from phantomwalk.lib.all_atom import create_openmm_handoff
