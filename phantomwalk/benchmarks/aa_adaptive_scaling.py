@@ -13,7 +13,11 @@ from phantomwalk.benchmarks.aa_test_systems import (
     build_test_system,
     minimum_nonbonded_distance_a,
 )
-from phantomwalk.lib.all_atom import create_interchange, minimize_interchange
+from phantomwalk.lib.all_atom import (
+    create_interchange,
+    minimize_interchange,
+    run_interchange_dynamics,
+)
 from phantomwalk.lib.fastfire import AllAtomFastFIRESettings, run_all_atom_fastfire
 
 HIGH_DENSITY = {"pe": 1.1, "p3ht": 1.1, "pes": 1.3}
@@ -33,6 +37,7 @@ def run_case(
     target_atoms: int,
     seed: int,
     measure_distance: bool,
+    dynamics_steps: int,
 ) -> dict:
     """Initialize and minimize one dense all-atom melt."""
 
@@ -50,6 +55,17 @@ def run_case(
     )
     distance = minimum_nonbonded_distance_a(compound) if measure_distance else None
     minimization = minimize_interchange(interchange)
+    dynamics = (
+        run_interchange_dynamics(
+            interchange,
+            nvt_steps=dynamics_steps,
+            npt_steps=dynamics_steps,
+            report_interval=max(1, dynamics_steps // 10),
+            seed=seed,
+        )
+        if dynamics_steps
+        else None
+    )
     return {
         "system": system,
         "density_g_cm3": density,
@@ -69,6 +85,7 @@ def run_case(
         ),
         "openmm_s": minimization.elapsed_s,
         "openmm_platform": minimization.platform_name,
+        "dynamics": asdict(dynamics) if dynamics is not None else None,
         "peak_rss_gib": _rss_gib(),
         "total_s": time.perf_counter() - started,
         **asdict(fastfire),
@@ -83,6 +100,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--density", type=float)
     parser.add_argument("--skip-distance", action="store_true")
+    parser.add_argument("--dynamics-steps", type=int, default=0)
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     for system in args.systems:
@@ -93,6 +111,7 @@ def main() -> None:
             args.target_atoms,
             args.seed,
             not args.skip_distance,
+            args.dynamics_steps,
         )
         with args.output.open("a") as handle:
             handle.write(json.dumps(row) + "\n")

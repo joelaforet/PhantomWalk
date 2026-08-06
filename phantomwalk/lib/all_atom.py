@@ -44,6 +44,18 @@ class OpenMMMinimizationResult:
     platform_name: str
 
 
+@dataclass(frozen=True)
+class OpenMMDynamicsResult:
+    """Stability summary for short production-force-field NVT and NPT runs."""
+
+    nvt_s: float
+    npt_s: float
+    platform_name: str
+    finite: bool
+    nvt_log: list[dict[str, float]]
+    npt_log: list[dict[str, float]]
+
+
 def _openff_indices(key: Any) -> tuple[int, ...]:
     """Return atom indices from an OpenFF topology key."""
 
@@ -274,6 +286,147 @@ def minimize_interchange(
         finite=finite,
         platform_name=selected_name,
     )
+
+
+def run_interchange_dynamics(
+    interchange: Any,
+    nvt_steps: int = 1_000,
+    npt_steps: int = 1_000,
+    report_interval: int = 100,
+    temperature_k: float = 300.0,
+    pressure_bar: float = 1.0,
+    timestep_fs: float = 1.0,
+    seed: int = 11,
+    platform_name: str = "auto",
+) -> OpenMMDynamicsResult:
+    """Run short NVT and NPT production-force-field stability checks."""
+
+    import time
+
+    import openmm
+    from openmm import unit as openmm_unit
+    from openff.units.openmm import from_openmm
+
+    selected_name, platform, properties = _openmm_platform(platform_name, openmm)
+    temperature = temperature_k * openmm_unit.kelvin
+    timestep = timestep_fs * openmm_unit.femtoseconds
+    nvt_started = time.perf_counter()
+    nvt_system = interchange.to_openmm_system()
+    nvt_integrator = openmm.LangevinMiddleIntegrator(
+        temperature, 1.0 / openmm_unit.picosecond, timestep
+    )
+    nvt_integrator.setRandomNumberSeed(seed)
+    nvt_context = openmm.Context(nvt_system, nvt_integrator, platform, properties)
+    nvt_context.setPositions(interchange.positions.to_openmm())
+    nvt_context.setVelocitiesToTemperature(temperature, seed)
+    nvt_log = _run_openmm_phase(
+        nvt_context, nvt_integrator, nvt_system, nvt_steps, report_interval
+    )
+    nvt_state = nvt_context.getState(getPositions=True, getVelocities=True)
+    nvt_s = time.perf_counter() - nvt_started
+
+    npt_started = time.perf_counter()
+    npt_system = interchange.to_openmm_system()
+    npt_system.addForce(
+        openmm.MonteCarloBarostat(
+            pressure_bar * openmm_unit.bar,
+            temperature,
+            25,
+        )
+    )
+    npt_integrator = openmm.LangevinMiddleIntegrator(
+        temperature, 1.0 / openmm_unit.picosecond, timestep
+    )
+    npt_integrator.setRandomNumberSeed(seed + 1)
+    npt_context = openmm.Context(npt_system, npt_integrator, platform, properties)
+    npt_context.setPeriodicBoxVectors(*nvt_state.getPeriodicBoxVectors())
+    npt_context.setPositions(nvt_state.getPositions())
+    npt_context.setVelocities(nvt_state.getVelocities())
+    npt_log = _run_openmm_phase(
+        npt_context, npt_integrator, npt_system, npt_steps, report_interval
+    )
+    npt_state = npt_context.getState(getPositions=True)
+    interchange.positions = from_openmm(npt_state.getPositions(asNumpy=True))
+    npt_s = time.perf_counter() - npt_started
+    finite = all(
+        np.isfinite(value)
+        for row in (*nvt_log, *npt_log)
+        for value in row.values()
+    )
+    return OpenMMDynamicsResult(
+        nvt_s=nvt_s,
+        npt_s=npt_s,
+        platform_name=selected_name,
+        finite=bool(finite),
+        nvt_log=nvt_log,
+        npt_log=npt_log,
+    )
+
+
+def _openmm_platform(platform_name: str, openmm: Any) -> tuple[str, Any, dict]:
+    """Select an OpenMM platform and appropriate properties."""
+
+    available = {
+        openmm.Platform.getPlatform(index).getName()
+        for index in range(openmm.Platform.getNumPlatforms())
+    }
+    selected_name = (
+        "CUDA" if platform_name == "auto" and "CUDA" in available else platform_name
+    )
+    if selected_name == "auto":
+        selected_name = "CPU"
+    platform = openmm.Platform.getPlatformByName(selected_name)
+    properties = {"Precision": "mixed"} if selected_name == "CUDA" else {}
+    return selected_name, platform, properties
+
+
+def _run_openmm_phase(
+    context: Any,
+    integrator: Any,
+    system: Any,
+    steps: int,
+    report_interval: int,
+) -> list[dict[str, float]]:
+    """Run one dynamics phase and collect intensive stability metrics."""
+
+    from openmm import unit as openmm_unit
+
+    masses = sum(
+        system.getParticleMass(index).value_in_unit(openmm_unit.dalton)
+        for index in range(system.getNumParticles())
+    )
+    dof = max(1, 3 * system.getNumParticles() - system.getNumConstraints() - 3)
+    gas_constant = openmm_unit.MOLAR_GAS_CONSTANT_R.value_in_unit(
+        openmm_unit.kilojoule_per_mole / openmm_unit.kelvin
+    )
+    output = []
+    completed = 0
+    while completed < steps:
+        interval = min(report_interval, steps - completed)
+        integrator.step(interval)
+        completed += interval
+        state = context.getState(getEnergy=True)
+        potential = state.getPotentialEnergy().value_in_unit(
+            openmm_unit.kilojoule_per_mole
+        )
+        kinetic = state.getKineticEnergy().value_in_unit(
+            openmm_unit.kilojoule_per_mole
+        )
+        vectors = state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(
+            openmm_unit.nanometer
+        )
+        volume = float(abs(np.linalg.det(vectors)))
+        output.append(
+            {
+                "step": float(completed),
+                "potential_energy_per_atom_kj_mol": potential
+                / system.getNumParticles(),
+                "temperature_k": 2.0 * kinetic / (dof * gas_constant),
+                "volume_nm3": volume,
+                "density_g_cm3": masses * 1.66053906660e-3 / volume,
+            }
+        )
+    return output
 
 
 def _parameterize_children(
