@@ -295,7 +295,7 @@ def run_interchange_dynamics(
     report_interval: int = 100,
     temperature_k: float = 300.0,
     pressure_bar: float = 1.0,
-    timestep_fs: float = 1.0,
+    timestep_fs: float = 2.0,
     seed: int = 11,
     platform_name: str = "auto",
 ) -> OpenMMDynamicsResult:

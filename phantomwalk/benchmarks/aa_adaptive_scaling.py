@@ -38,6 +38,7 @@ def run_case(
     seed: int,
     measure_distance: bool,
     dynamics_steps: int,
+    timestep_fs: float,
 ) -> dict:
     """Initialize and minimize one dense all-atom melt."""
 
@@ -61,6 +62,7 @@ def run_case(
             nvt_steps=dynamics_steps,
             npt_steps=dynamics_steps,
             report_interval=max(1, dynamics_steps // 10),
+            timestep_fs=timestep_fs,
             seed=seed,
         )
         if dynamics_steps
@@ -101,6 +103,7 @@ def main() -> None:
     parser.add_argument("--density", type=float)
     parser.add_argument("--skip-distance", action="store_true")
     parser.add_argument("--dynamics-steps", type=int, default=0)
+    parser.add_argument("--timestep-fs", type=float, default=2.0)
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     for system in args.systems:
@@ -112,6 +115,7 @@ def main() -> None:
             args.seed,
             not args.skip_distance,
             args.dynamics_steps,
+            args.timestep_fs,
         )
         with args.output.open("a") as handle:
             handle.write(json.dumps(row) + "\n")
