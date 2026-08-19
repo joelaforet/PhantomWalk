@@ -13,6 +13,7 @@ __pycache__/
 phantomwalk/examples/rdf.csv
 phantomwalk/examples/trajectory.gsd
 phantomwalk/examples/log.txt
+phantomwalk/examples/aa_dpd_showcase/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -20,4 +21,3 @@ phantomwalk/examples/log.txt
 # IPython
 profile_default/
 ipython_config.py
-

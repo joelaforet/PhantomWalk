@@ -1,10 +1,10 @@
-name: phantomwalk
+name: phantomwalk-gpu
 channels:
   - conda-forge
 dependencies:
   - freud >=3.4
   - gsd >=3.0
-  - hoomd>=5.0,!=5.3.0
+  - hoomd[build=gpu_*] >=5.0,!=5.3.0
   - numpy >=2.0, <2.3
   - numba
   - python >=3.12, <3.13

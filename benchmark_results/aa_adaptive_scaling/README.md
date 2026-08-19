@@ -1,11 +1,20 @@
 # Adaptive all-atom initialization scaling
 
-## Protocol
+Historical note: these are superseded reduced-unit adaptive-scaling results.
+They are retained as developmental evidence only; they are not current
+recommendations and their timings are not directly comparable to the final
+physical-Angstrom AA-DPD/FastFIRE protocol. In the final protocol, physical
+Angstrom, amu, and kcal/mol conventions are used, but `kT`, `dt`, `gamma`, and
+the DPD trajectory are empirical initialization controls, not calibrated
+physical dynamics.
+
+## Historical protocol
 
 The adaptive protocol runs a 2000-step DPD baseline followed by 250-step
-extensions. It stops after every intensive force-energy component changes by
-no more than 2% for two consecutive checks. It then runs at least 100 FIRE
-steps, continuing FIRE when required by its convergence criterion.
+extensions. It uses an empirical intensive-energy stopping criterion: stop after
+every intensive force-energy component changes by no more than 2% for two
+consecutive checks. It then runs at least 100 FIRE steps, continuing FIRE when
+required by its numerical stopping criterion.
 
 The handoff validation uses uncapped OpenMM minimization with OpenFF Sage
 2.3.0 and AshGC charges on CUDA. Production stability tests run 1000 steps of

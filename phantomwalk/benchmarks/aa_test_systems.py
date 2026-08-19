@@ -89,10 +89,27 @@ def build_test_system(
 ) -> Any:
     """Clone chains into a cubic box sized to the requested mass density."""
 
+    chain = build_chain(system, degree, seed)
+    n_chains = max(1, int(np.ceil(target_atoms / chain.n_particles)))
+    return build_melt(system, n_chains, degree, density_g_cm3, seed)
+
+
+def build_melt(
+    system: str,
+    n_chains: int,
+    degree: int = 50,
+    density_g_cm3: float | None = None,
+    seed: int = 11,
+) -> Any:
+    """Build an all-atom polymer melt with an exact mass-density box."""
+
+    if n_chains <= 0:
+        raise ValueError("n_chains must be positive")
+    if density_g_cm3 is None:
+        density_g_cm3 = max(SYSTEM_DENSITIES[system])
     import mbuild as mb
 
     chain = build_chain(system, degree, seed)
-    n_chains = max(1, int(np.ceil(target_atoms / chain.n_particles)))
     chain_mass = sum(float(particle.mass) for particle in chain.particles())
     box_length = (n_chains * chain_mass * AMU_NM3_TO_G_CM3 / density_g_cm3) ** (1 / 3)
     root = mb.Compound(name=system.upper())
@@ -112,14 +129,28 @@ def _completed_keys(path: Path) -> set[tuple[Any, ...]]:
     return keys
 
 
-def write_visualization_pdb(compound: Any, path: Path) -> None:
-    """Write a PDB with unique segments and one residue per mBuild monomer."""
+def write_visualization_pdb(compound: Any, path: Path, *, make_whole: bool = True) -> None:
+    """Write a residue-aware PDB with whole, centered polymer chains."""
+
+    from phantomwalk.lib.all_atom import make_molecules_whole
 
     path.parent.mkdir(parents=True, exist_ok=True)
     particles = list(compound.particles())
     if len(particles) > 99_999:
         raise ValueError("legacy PDB atom serials support at most 99,999 atoms")
     particle_index = {particle: index + 1 for index, particle in enumerate(particles)}
+    zero_based_index = {particle: index for index, particle in enumerate(particles)}
+    positions_nm = np.asarray(compound.xyz, dtype=float)
+    if make_whole:
+        indexed_bonds = [
+            (zero_based_index[first], zero_based_index[second])
+            for first, second in compound.bonds()
+        ]
+        positions_nm = make_molecules_whole(
+            positions_nm,
+            indexed_bonds,
+            np.asarray(compound.box.lengths, dtype=float),
+        )
     chains = [child for child in compound.children if child.name == "Polymer"]
     if compound.name == "Polymer":
         chains = [compound]
@@ -151,14 +182,14 @@ def write_visualization_pdb(compound: Any, path: Path) -> None:
         "  90.00  90.00  90.00 P 1           1"
     ]
     atom_counts: dict[tuple[str, int, str], dict[str, int]] = {}
-    for serial, particle in enumerate(particles, start=1):
+    for serial, (particle, position_nm) in enumerate(zip(particles, positions_nm), start=1):
         segment_id, residue_id, residue_name = atom_locations[particle]
         element = particle.element.symbol
         location = (segment_id, residue_id, residue_name)
         counts = atom_counts.setdefault(location, {})
         counts[element] = counts.get(element, 0) + 1
         atom_name = f"{element}{counts[element]}"[:4]
-        x, y, z = np.asarray(particle.xyz, dtype=float)[0] * 10.0
+        x, y, z = position_nm * 10.0
         lines.append(
             f"HETATM{serial:5d} {atom_name:<4s} {residue_name:>3s}  {residue_id:4d}    "
             f"{x:8.3f}{y:8.3f}{z:8.3f}{1.0:6.2f}{0.0:6.2f}      "
@@ -236,6 +267,44 @@ def minimum_nonbonded_distance_a(compound: Any) -> float:
                 raise RuntimeError("could not locate a nonexcluded neighbor for every atom")
             closest = min(closest, float(np.min(extra_distances[extra_valid])))
     return closest * 10.0
+
+
+def shortest_periodic_one_four_distance_a(compound: Any) -> float:
+    """Return the shortest periodic distance between atoms three bonds apart."""
+
+    particles = list(compound.particles())
+    particle_index = {particle: index for index, particle in enumerate(particles)}
+    adjacency = [set() for _ in particles]
+    for first, second in compound.bonds():
+        i, j = particle_index[first], particle_index[second]
+        adjacency[i].add(j)
+        adjacency[j].add(i)
+
+    one_four_pairs = set()
+    for atom in range(len(particles)):
+        seen = {atom}
+        frontier = {atom}
+        for depth in range(1, 4):
+            frontier = {
+                neighbor for current in frontier for neighbor in adjacency[current]
+            } - seen
+            if depth == 3:
+                one_four_pairs.update(
+                    (min(atom, neighbor), max(atom, neighbor))
+                    for neighbor in frontier
+                )
+            seen.update(frontier)
+
+    if not one_four_pairs:
+        return float("nan")
+    positions = np.asarray([particle.pos for particle in particles], dtype=float)
+    box = np.asarray(compound.box.lengths, dtype=float)
+    distances = []
+    for first, second in one_four_pairs:
+        delta = positions[second] - positions[first]
+        delta -= box * np.rint(delta / box)
+        distances.append(np.linalg.norm(delta))
+    return float(np.min(distances) * 10.0)
 
 
 def _base36(value: int) -> str:

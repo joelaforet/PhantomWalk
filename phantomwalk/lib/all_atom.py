@@ -12,14 +12,17 @@ import numpy as np
 class AllAtomParameters:
     """Numeric, HOOMD-ready parameters in OpenFF units.
 
-    Lengths are in Angstrom and energies are in kcal/mol before reduction.
+    Lengths are in Angstrom, masses are in amu, and energies are in kcal/mol.
     """
 
     positions_a: np.ndarray
     box_lengths_a: np.ndarray
+    masses_amu: np.ndarray = field(default_factory=lambda: np.asarray([], dtype=float))
+    atom_types: list[str] = field(default_factory=list)
+    type_epsilons_kcal_mol: dict[str, float] = field(default_factory=dict)
     bonds: list[tuple[int, int]] = field(default_factory=list)
     bond_types: list[str] = field(default_factory=list)
-    bond_lengths_a: dict[str, float] = field(default_factory=dict)
+    bond_params: dict[str, dict[str, float]] = field(default_factory=dict)
     angles: list[tuple[int, int, int]] = field(default_factory=list)
     angle_types: list[str] = field(default_factory=list)
     angle_params: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -30,7 +33,6 @@ class AllAtomParameters:
     improper_types: list[str] = field(default_factory=list)
     improper_params: dict[str, dict[str, float]] = field(default_factory=dict)
     epsilon_ref_kcal_mol: float = 0.0
-    sigma_ref_a: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,76 @@ def _as_float(value: Any, target_unit: Any) -> float:
     """Convert an OpenFF quantity to a plain float."""
 
     return float(value.m_as(target_unit))
+
+
+def make_molecules_whole(
+    positions: np.ndarray,
+    bonds: list[tuple[int, int]],
+    box_lengths: np.ndarray,
+    *,
+    center: bool = True,
+) -> np.ndarray:
+    """Return whole periodic molecules reconstructed by their bond graph.
+
+    Each connected component is unwrapped independently with minimum-image bond
+    vectors. When ``center`` is true, each component is translated so its
+    centroid lies in the ``0..L`` display cell. Input coordinates are not
+    modified, and positions and box lengths may use any consistent length unit.
+    """
+
+    positions = np.asarray(positions, dtype=float)
+    box_lengths = np.asarray(box_lengths, dtype=float)
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError("positions must have shape (n_particles, 3)")
+    if box_lengths.shape != (3,) or np.any(box_lengths <= 0.0):
+        raise ValueError("box_lengths must contain three positive values")
+
+    adjacency = [[] for _ in positions]
+    for first, second in bonds:
+        adjacency[first].append(second)
+        adjacency[second].append(first)
+
+    output = positions.copy()
+    visited = np.zeros(len(positions), dtype=bool)
+    for root in range(len(positions)):
+        if visited[root]:
+            continue
+        visited[root] = True
+        pending = [root]
+        component = [root]
+        while pending:
+            atom = pending.pop()
+            for neighbor in adjacency[atom]:
+                if visited[neighbor]:
+                    continue
+                delta = positions[neighbor] - positions[atom]
+                delta -= box_lengths * np.rint(delta / box_lengths)
+                output[neighbor] = output[atom] + delta
+                visited[neighbor] = True
+                pending.append(neighbor)
+                component.append(neighbor)
+        if center:
+            centroid = output[component].mean(axis=0)
+            target = np.mod(centroid, box_lengths)
+            target[np.isclose(target, box_lengths)] = 0.0
+            output[component] += target - centroid
+    return output
+
+
+def _topology_key(compound: Any, particles: list[Any] | None = None) -> tuple[Any, ...]:
+    """Return a cache key for a disconnected molecular topology."""
+
+    particles = particles or list(compound.particles())
+    local_index = {particle: index for index, particle in enumerate(particles)}
+    return (
+        tuple(particle.element.atomic_number for particle in particles),
+        tuple(
+            sorted(
+                tuple(sorted((local_index[first], local_index[second])))
+                for first, second in compound.bonds()
+            )
+        ),
+    )
 
 
 def compound_to_openff_molecule(compound: Any) -> Any:
@@ -141,13 +213,19 @@ def parameterize_all_atom(
         bonds=bonds,
     )
 
-    epsilons = []
-    sigmas = []
-    for parameter in labels["vdW"].values():
-        epsilons.append(_as_float(parameter.epsilon, unit.kilocalorie_per_mole))
-        sigmas.append(_as_float(parameter.sigma, unit.angstrom))
-    result.epsilon_ref_kcal_mol = max(epsilons)
-    result.sigma_ref_a = max(sigmas)
+    result.masses_amu = np.asarray([float(particle.mass) for particle in particles], dtype=float)
+    atom_types = [""] * len(particles)
+    for key, parameter in labels["vdW"].items():
+        index = _openff_indices(key)[0]
+        name = str(parameter.id)
+        atom_types[index] = name
+        result.type_epsilons_kcal_mol[name] = _as_float(
+            parameter.epsilon, unit.kilocalorie_per_mole
+        )
+    if any(not atom_type for atom_type in atom_types):
+        raise ValueError("Sage did not assign a vdW type to every atom")
+    result.atom_types = atom_types
+    result.epsilon_ref_kcal_mol = max(result.type_epsilons_kcal_mol.values())
 
     bond_labels = {_openff_indices(key): value for key, value in labels["Bonds"].items()}
     for bond in bonds:
@@ -156,7 +234,10 @@ def parameterize_all_atom(
             raise ValueError(f"Sage did not label bond {bond}")
         name = str(parameter.id)
         result.bond_types.append(name)
-        result.bond_lengths_a[name] = _as_float(parameter.length, unit.angstrom)
+        result.bond_params[name] = {
+            "k": _as_float(parameter.k, unit.kilocalorie_per_mole / unit.angstrom**2),
+            "r0": _as_float(parameter.length, unit.angstrom),
+        }
 
     for key, parameter in labels["Angles"].items():
         name = str(parameter.id)
@@ -211,11 +292,26 @@ def update_interchange_positions(interchange: Any, compound: Any) -> None:
 
 
 def update_compound_positions(compound: Any, interchange: Any) -> None:
-    """Set mBuild coordinates from the current Interchange positions."""
+    """Set mBuild coordinates and periodic box from an Interchange."""
 
     from openff.units import unit
 
     compound.xyz = np.asarray(interchange.positions.m_as(unit.nanometer), dtype=float)
+    if interchange.box is not None:
+        import mbuild as mb
+
+        vectors = np.asarray(interchange.box.m_as(unit.nanometer), dtype=float)
+        lengths = np.linalg.norm(vectors, axis=1)
+        cosines = np.clip(
+            [
+                np.dot(vectors[1], vectors[2]) / (lengths[1] * lengths[2]),
+                np.dot(vectors[0], vectors[2]) / (lengths[0] * lengths[2]),
+                np.dot(vectors[0], vectors[1]) / (lengths[0] * lengths[1]),
+            ],
+            -1.0,
+            1.0,
+        )
+        compound.box = mb.Box(lengths=lengths, angles=np.degrees(np.arccos(cosines)))
 
 
 def create_openmm_handoff(
@@ -277,8 +373,15 @@ def minimize_interchange(
     minimized_energy = minimized_state.getPotentialEnergy().value_in_unit(
         openmm_unit.kilojoule_per_mole
     )
-    interchange.positions = from_openmm(minimized_state.getPositions(asNumpy=True))
-    finite = bool(np.isfinite(initial_energy) and np.isfinite(minimized_energy))
+    minimized_positions = minimized_state.getPositions(asNumpy=True)
+    interchange.positions = from_openmm(minimized_positions)
+    finite = bool(
+        np.isfinite(initial_energy)
+        and np.isfinite(minimized_energy)
+        and np.isfinite(
+            minimized_positions.value_in_unit(openmm_unit.nanometer)
+        ).all()
+    )
     return OpenMMMinimizationResult(
         initial_energy_kj_mol=float(initial_energy),
         minimized_energy_kj_mol=float(minimized_energy),
@@ -345,13 +448,32 @@ def run_interchange_dynamics(
     npt_log = _run_openmm_phase(
         npt_context, npt_integrator, npt_system, npt_steps, report_interval
     )
-    npt_state = npt_context.getState(getPositions=True)
-    interchange.positions = from_openmm(npt_state.getPositions(asNumpy=True))
+    npt_state = npt_context.getState(getEnergy=True, getPositions=True)
+    npt_positions = npt_state.getPositions(asNumpy=True)
+    npt_vectors = npt_state.getPeriodicBoxVectors(asNumpy=True)
+    interchange.positions = from_openmm(npt_positions)
+    interchange.box = from_openmm(npt_vectors)
     npt_s = time.perf_counter() - npt_started
+    final_positions = npt_positions.value_in_unit(openmm_unit.nanometer)
+    final_vectors = npt_vectors.value_in_unit(openmm_unit.nanometer)
+    final_volume = float(abs(np.linalg.det(final_vectors)))
+    final_potential = npt_state.getPotentialEnergy().value_in_unit(
+        openmm_unit.kilojoule_per_mole
+    )
+    final_kinetic = npt_state.getKineticEnergy().value_in_unit(
+        openmm_unit.kilojoule_per_mole
+    )
     finite = all(
         np.isfinite(value)
         for row in (*nvt_log, *npt_log)
         for value in row.values()
+    ) and bool(
+        np.isfinite(final_positions).all()
+        and np.isfinite(final_vectors).all()
+        and np.isfinite(final_potential)
+        and np.isfinite(final_kinetic)
+        and np.isfinite(final_volume)
+        and final_volume > 0.0
     )
     return OpenMMDynamicsResult(
         nvt_s=nvt_s,
@@ -405,7 +527,7 @@ def _run_openmm_phase(
         interval = min(report_interval, steps - completed)
         integrator.step(interval)
         completed += interval
-        state = context.getState(getEnergy=True)
+        state = context.getState(getEnergy=True, getPositions=True)
         potential = state.getPotentialEnergy().value_in_unit(
             openmm_unit.kilojoule_per_mole
         )
@@ -415,7 +537,19 @@ def _run_openmm_phase(
         vectors = state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(
             openmm_unit.nanometer
         )
+        positions = state.getPositions(asNumpy=True).value_in_unit(
+            openmm_unit.nanometer
+        )
         volume = float(abs(np.linalg.det(vectors)))
+        if not (
+            np.isfinite(positions).all()
+            and np.isfinite(vectors).all()
+            and np.isfinite(potential)
+            and np.isfinite(kinetic)
+            and np.isfinite(volume)
+            and volume > 0.0
+        ):
+            raise RuntimeError("OpenMM dynamics produced a non-finite state")
         output.append(
             {
                 "step": float(completed),
@@ -447,16 +581,7 @@ def _parameterize_children(
     cached: dict[tuple[Any, ...], AllAtomParameters] = {}
     for child in children:
         particles = list(child.particles())
-        local_index = {particle: index for index, particle in enumerate(particles)}
-        topology_key = (
-            tuple(particle.element.atomic_number for particle in particles),
-            tuple(
-                sorted(
-                    tuple(sorted((local_index[first], local_index[second])))
-                    for first, second in child.bonds()
-                )
-            ),
-        )
+        topology_key = _topology_key(child, particles)
         current = cached.get(topology_key)
         if current is None:
             original_box = child.box
@@ -480,14 +605,16 @@ def _parameterize_children(
         merged.angle_types.extend(current.angle_types)
         merged.dihedral_types.extend(current.dihedral_types)
         merged.improper_types.extend(current.improper_types)
-        merged.bond_lengths_a.update(current.bond_lengths_a)
+        merged.masses_amu = np.concatenate((merged.masses_amu, current.masses_amu))
+        merged.atom_types.extend(current.atom_types)
+        merged.type_epsilons_kcal_mol.update(current.type_epsilons_kcal_mol)
+        merged.bond_params.update(current.bond_params)
         merged.angle_params.update(current.angle_params)
         merged.dihedral_params.update(current.dihedral_params)
         merged.improper_params.update(current.improper_params)
         merged.epsilon_ref_kcal_mol = max(
             merged.epsilon_ref_kcal_mol, current.epsilon_ref_kcal_mol
         )
-        merged.sigma_ref_a = max(merged.sigma_ref_a, current.sigma_ref_a)
         offset += child.n_particles
     return merged
 

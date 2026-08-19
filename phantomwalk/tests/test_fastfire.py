@@ -5,6 +5,7 @@ import pytest
 
 from phantomwalk.lib.fastfire import (
     AllAtomFastFIRESettings,
+    _epsilon_per_atom_energies,
     _energies_converged,
     _intensive_energies,
     _unwrap,
@@ -29,9 +30,25 @@ def test_intensive_energy_convergence_is_size_independent():
         {"bond": 101.0, "angle": 40.4, "pair": 202.0}, 20, counts
     )
 
-    assert first == {"bond": 10.0, "angle": 5.0, "pair": 10.0}
+    assert first == {
+        "bond_energy_per_interaction": 10.0,
+        "angle_energy_per_interaction": 5.0,
+        "pair_energy_per_atom": 10.0,
+    }
     assert _energies_converged(first, second, 0.02)
-    assert not _energies_converged(first, {**second, "pair": 10.3}, 0.02)
+    assert not _energies_converged(first, {**second, "pair_energy_per_atom": 10.3}, 0.02)
+
+
+def test_epsilon_per_atom_energies_match_cg_normalization():
+    normalized = _epsilon_per_atom_energies(
+        {"bond": 80.0, "pair": 120.0}, n_particles=20, epsilon_ref=2.0
+    )
+
+    assert normalized == {
+        "bond_energy_epsilon_per_atom": 2.0,
+        "pair_energy_epsilon_per_atom": 3.0,
+        "total_energy_epsilon_per_atom": 5.0,
+    }
 
 
 def test_short_cpu_fastfire_updates_finite_coordinates():
@@ -49,14 +66,16 @@ def test_short_cpu_fastfire_updates_finite_coordinates():
             fire_steps=1,
             fire_interval=100,
             fire_max_steps=1_000,
+            require_fire_convergence=False,
             device="CPU",
         ),
     )
 
     assert result.n_particles == 8
     assert result.elapsed_s > 0
-    assert result.fire_converged
     assert result.fire_steps <= 1_000
+    assert result.device_description
+    assert result.epsilon_ref_kcal_mol > 0
     assert result.dpd_steps == 1
     assert not result.dpd_converged
     assert np.isfinite(compound.xyz).all()

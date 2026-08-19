@@ -1,11 +1,20 @@
 # All-atom DPD/FIRE iteration sweep
 
-## Recommendation
+Historical note: these are superseded reduced-unit results. They are retained
+as negative and developmental history only; they are not current
+recommendations and their timings are not directly comparable to the final
+physical-Angstrom AA-DPD/FastFIRE protocol. In the final protocol, physical
+Angstrom, amu, and kcal/mol conventions are used, but `kT`, `dt`, `gamma`, and
+the DPD trajectory are empirical initialization controls, not calibrated
+physical dynamics.
 
-Use **1000 DPD steps followed by 100 FIRE steps** for the dense all-atom
-initialization protocol. This was the fastest tested setting that retained a
-useful safety margin at approximately 10,000 atoms for PE, P3HT, and PES and
-then minimized successfully with the uncapped OpenMM minimizer on CUDA.
+## Historical recommendation at the time
+
+The historical recommendation was **1000 DPD steps followed by 100 FIRE steps**
+for the then-current dense all-atom initialization protocol. This was the
+fastest tested setting that retained a useful safety margin at approximately
+10,000 atoms for PE, P3HT, and PES and then minimized successfully with the
+uncapped OpenMM minimizer on CUDA.
 
 The 100th FIRE step is inexpensive relative to the DPD phase. At 10k atoms,
 1000/100 and 1000/50 had effectively identical mean FastFIRE wall times
@@ -46,7 +55,7 @@ DPD steps control the size-robust removal of the random-walk overlaps. FIRE is
 cheap cleanup after that process, but adding FIRE iterations does not rescue a
 DPD phase that is too short. Beyond 1000 DPD steps, the small-system grid found
 diminishing structural benefit relative to wall time. FIRE frequently reached
-the current numerical convergence criterion by 100 steps in the small systems,
+the historical numerical stopping criterion by 100 steps in the small systems,
 although P3HT and PES at 10k did not; the recommendation is therefore a fixed,
 fast initialization protocol validated by geometry and OpenMM handoff, not a
 claim that FIRE is fully converged for every system.

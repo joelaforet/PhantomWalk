@@ -6,14 +6,34 @@ import pytest
 from phantomwalk.lib.all_atom import (
     create_interchange,
     create_openmm_handoff,
+    make_molecules_whole,
     minimize_interchange,
     parameterize_all_atom,
 )
 from phantomwalk.benchmarks.aa_test_systems import build_chain
 
 
+def test_make_molecules_whole_centers_each_connected_component():
+    positions = np.array(
+        [[0.1, 1.0, 1.0], [9.9, 1.0, 1.0], [4.9, -0.1, 2.0], [4.9, 9.8, 2.0]]
+    )
+    original = positions.copy()
+
+    whole = make_molecules_whole(
+        positions, [(0, 1), (2, 3)], np.array([10.0, 10.0, 10.0])
+    )
+
+    np.testing.assert_allclose(positions, original)
+    np.testing.assert_allclose(
+        np.linalg.norm(whole[[1, 3]] - whole[[0, 2]], axis=1), [0.2, 0.1]
+    )
+    for component in ([0, 1], [2, 3]):
+        centroid = whole[component].mean(axis=0)
+        assert np.all((centroid >= 0.0) & (centroid < 10.0))
+
+
 def test_sage_230_parameterizes_explicit_hydrogens():
-    """Sage labels every ethane bond and supplies positive reduction scales."""
+    """Sage labels every ethane bond and supplies physical parameters."""
 
     mbuild = pytest.importorskip("mbuild")
     compound = mbuild.load("CC", smiles=True)
@@ -25,8 +45,13 @@ def test_sage_230_parameterizes_explicit_hydrogens():
     assert len(parameters.bonds) == 7
     assert len(parameters.bond_types) == 7
     assert len(parameters.angles) == 12
+    assert len(parameters.masses_amu) == 8
+    assert len(parameters.atom_types) == 8
+    assert parameters.masses_amu.sum() > 30.0
+    assert parameters.bond_params
+    assert all(values["k"] > 0 and values["r0"] > 0 for values in parameters.bond_params.values())
     assert parameters.epsilon_ref_kcal_mol > 0
-    assert parameters.sigma_ref_a > 0
+    assert set(parameters.atom_types) <= set(parameters.type_epsilons_kcal_mol)
     np.testing.assert_allclose(parameters.box_lengths_a, [30, 30, 30])
 
 
@@ -45,6 +70,8 @@ def test_parameterizes_rooted_chains_as_separate_molecules():
 
     assert len(parameters.positions_a) == 16
     assert len(parameters.bonds) == 14
+    assert len(parameters.masses_amu) == 16
+    assert len(parameters.atom_types) == 16
     assert max(max(group) for group in parameters.bonds) == 15
 
 

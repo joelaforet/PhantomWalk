@@ -1,9 +1,19 @@
 # All-atom benchmark notes
 
-## Bonded scaling experiment
+The current all-atom AA-DPD initializer is the physical-Angstrom FastFIRE
+protocol documented in the repository README and demonstrated in
+`phantomwalk/examples/4-aa-dpd-fastfire.ipynb`. The reduced-unit experiments
+below are historical negative results. They are retained to explain discarded
+parameter choices and should not be used as current settings or compared
+directly to final physical-unit timings. In the final protocol, physical
+Angstrom, amu, and kcal/mol conventions are used, but `kT`, `dt`, `gamma`, and
+the DPD trajectory remain empirical initialization controls rather than
+calibrated physical dynamics.
 
-On 2026-08-04, we tested two alternatives to the working MuPT-style bonded
-scaling in the 500-step DPD plus 200-step FIRE protocol:
+## Historical discarded reduced-unit bonded scaling experiment
+
+On 2026-08-04, we tested two alternatives to the then-current reduced-unit
+bonded scaling in a 500-step DPD plus 200-step FIRE protocol:
 
 1. `uniform`: set every bond, angle, proper-torsion term, and improper-torsion
    term to a dimensionless force constant of 250,000.
@@ -12,7 +22,7 @@ scaling in the 500-step DPD plus 200-step FIRE protocol:
 
 The tests used approximately 10,000 atoms, seed 11, and the highest-density
 state point for each chemistry. Both alternatives kept all bond force constants
-at 250,000 and used the existing reduced units, timestep, DPD repulsion, and
+at 250,000 and used the old reduced units, timestep, DPD repulsion, and
 friction.
 
 | Chemistry | Density (g/cm^3) | Policy | Result |
@@ -31,8 +41,9 @@ periodic unwrapping discontinuity, but the RMS error and enormous initial Sage
 energy independently show that the handoff was not improved.
 
 Conclusion: assigning a reduced force constant of 250,000 to angular and
-torsional terms is too stiff for the current timestep and short protocol. The
-experimental code paths were removed. Continue using the working implementation:
-uniform dimensionless bond constants of 250,000, with OpenFF angle, proper, and
-improper strengths divided by the reference LJ epsilon and multiplied by the
-MuPT bonded scale of 30.
+torsional terms was too stiff for the old timestep and short reduced-unit
+protocol. The experimental code paths were removed. The final protocol instead
+uses physical Angstrom coordinates and force lengths, true masses, OpenFF 2.3.0
+bonded terms with all coefficients multiplied by 30 only during DPD/FIRE,
+vdW-epsilon-scaled DPD pairs with `A_base = 5000`, and an unscaled OpenFF
+Interchange for OpenMM.

@@ -17,9 +17,12 @@ dependencies:
   - openff-toolkit =0.18.1
   - openmm =8.5.2
   - jupyter
+  - matplotlib
   - pytest
   - pytest-cov
   - pip
+  - py3dmol
+  - scipy
   - pip:
       - build
       - git+https://github.com/mosdef-hub/mbuild.git@52a0897a946ee6a9734489523d519a4e396c948b
