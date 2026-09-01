@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from phantomwalk.lib.all_atom import AllAtomParameters
+from phantomwalk.lib.all_atom import AllAtomParameters, _molecular_compounds
 
 
 def _type_name(prefix: str, values: tuple[Any, ...], table: dict) -> str:
@@ -105,6 +105,10 @@ def _inversion_coefficients(atomic_number: int, carbonyl: bool) -> tuple[float, 
 
 def parameterize_uff(compound: Any) -> AllAtomParameters:
     """Extract deterministic, HOOMD-ready UFF tables from an mBuild compound."""
+
+    children = _molecular_compounds(compound)
+    if len(children) != 1 or children[0] is not compound:
+        return _parameterize_uff_children(compound, children)
 
     from rdkit import Chem
     from rdkit.Chem import rdForceFieldHelpers as uff
@@ -220,6 +224,67 @@ def parameterize_uff(compound: Any) -> AllAtomParameters:
             result.impropers.append(group); result.improper_types.append(name)
     result.improper_params = {n: {k: v for k, v in p.items() if k != "_key"} for n, p in inversion_table.items()}
     return result
+
+
+def _parameterize_uff_children(compound: Any, children: list[Any]) -> AllAtomParameters:
+    """Parameterize disconnected chains once per unique molecular graph."""
+
+    box = getattr(compound, "box", None)
+    if box is None:
+        raise ValueError("compound.box must define periodic box lengths")
+    merged = AllAtomParameters(
+        positions_a=np.asarray(compound.xyz, dtype=float) * 10.0,
+        box_lengths_a=np.asarray(box.lengths, dtype=float) * 10.0,
+    )
+    cached: dict[tuple[Any, ...], AllAtomParameters] = {}
+    offset = 0
+    for child in children:
+        particles = list(child.particles())
+        local_index = {particle: index for index, particle in enumerate(particles)}
+        topology_key = (
+            tuple(_particle_atomic_number(particle) for particle in particles),
+            tuple(
+                sorted(
+                    tuple(sorted((local_index[first], local_index[second])))
+                    for first, second in child.bonds()
+                )
+            ),
+        )
+        current = cached.get(topology_key)
+        if current is None:
+            original_box = child.box
+            child.box = box
+            try:
+                current = parameterize_uff(child)
+            finally:
+                child.box = original_box
+            cached[topology_key] = current
+        for field_name in ("bonds", "angles", "dihedrals", "impropers"):
+            getattr(merged, field_name).extend(
+                tuple(index + offset for index in group)
+                for group in getattr(current, field_name)
+            )
+        for field_name in (
+            "particle_types", "bond_types", "angle_types",
+            "dihedral_types", "improper_types",
+        ):
+            getattr(merged, field_name).extend(getattr(current, field_name))
+        merged.masses_amu = np.concatenate((merged.masses_amu, current.masses_amu))
+        for field_name in (
+            "particle_type_params", "bond_lengths_a", "bond_params",
+            "angle_params", "dihedral_params", "improper_params",
+        ):
+            target = getattr(merged, field_name)
+            for name, values in getattr(current, field_name).items():
+                if name in target and target[name] != values:
+                    raise ValueError(f"UFF type-name collision for {name}")
+                target[name] = values
+        merged.epsilon_ref_kcal_mol = max(
+            merged.epsilon_ref_kcal_mol, current.epsilon_ref_kcal_mol
+        )
+        merged.sigma_ref_a = max(merged.sigma_ref_a, current.sigma_ref_a)
+        offset += len(particles)
+    return merged
 
 
 def uff_energy_components(parameters: AllAtomParameters, positions_a: np.ndarray) -> dict[str, float]:

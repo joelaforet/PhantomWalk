@@ -98,3 +98,17 @@ def test_atom_order_mismatch_fails_clearly(monkeypatch):
     monkeypatch.setattr(compound, "to_rdkit", lambda: Chem.RenumberAtoms(original, order))
     with pytest.raises(ValueError, match="atom-order mismatch"):
         parameterize_uff(compound)
+
+
+def test_repeated_disconnected_chains_are_merged_with_global_indices():
+    mb = pytest.importorskip("mbuild")
+    root = mb.Compound()
+    root.add([_compound("CC"), _compound("CC")])
+    root.box = mb.Box(lengths=[8, 8, 8])
+
+    parameters = parameterize_uff(root)
+
+    assert len(parameters.positions_a) == 16
+    assert len(parameters.bonds) == 14
+    assert len(parameters.masses_amu) == 16
+    assert max(max(group) for group in parameters.bonds) == 15
