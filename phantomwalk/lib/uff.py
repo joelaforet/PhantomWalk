@@ -264,21 +264,36 @@ def _parameterize_uff_children(compound: Any, children: list[Any]) -> AllAtomPar
                 tuple(index + offset for index in group)
                 for group in getattr(current, field_name)
             )
-        for field_name in (
-            "particle_types", "bond_types", "angle_types",
-            "dihedral_types", "improper_types",
-        ):
-            getattr(merged, field_name).extend(getattr(current, field_name))
         merged.masses_amu = np.concatenate((merged.masses_amu, current.masses_amu))
-        for field_name in (
-            "particle_type_params", "bond_lengths_a", "bond_params",
-            "angle_params", "dihedral_params", "improper_params",
-        ):
-            target = getattr(merged, field_name)
-            for name, values in getattr(current, field_name).items():
-                if name in target and target[name] != values:
-                    raise ValueError(f"UFF type-name collision for {name}")
-                target[name] = values
+        table_pairs = (
+            ("particle_types", "particle_type_params"),
+            ("bond_types", "bond_params"),
+            ("angle_types", "angle_params"),
+            ("dihedral_types", "dihedral_params"),
+            ("improper_types", "improper_params"),
+        )
+        for types_field, params_field in table_pairs:
+            target_params = getattr(merged, params_field)
+            mapping = {}
+            for old_name, values in getattr(current, params_field).items():
+                matching = next(
+                    (name for name, existing in target_params.items() if existing == values),
+                    None,
+                )
+                if matching is None:
+                    matching = old_name
+                    suffix = 1
+                    while matching in target_params:
+                        matching = f"{old_name}_{suffix}"
+                        suffix += 1
+                    target_params[matching] = values
+                mapping[old_name] = matching
+            getattr(merged, types_field).extend(
+                mapping[name] for name in getattr(current, types_field)
+            )
+            if params_field == "bond_params":
+                for old_name, length in current.bond_lengths_a.items():
+                    merged.bond_lengths_a[mapping[old_name]] = length
         merged.epsilon_ref_kcal_mol = max(
             merged.epsilon_ref_kcal_mol, current.epsilon_ref_kcal_mol
         )

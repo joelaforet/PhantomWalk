@@ -112,3 +112,17 @@ def test_repeated_disconnected_chains_are_merged_with_global_indices():
     assert len(parameters.bonds) == 14
     assert len(parameters.masses_amu) == 16
     assert max(max(group) for group in parameters.bonds) == 15
+
+
+def test_distinct_disconnected_chemistries_remap_local_type_names():
+    mb = pytest.importorskip("mbuild")
+    root = mb.Compound()
+    root.add([_compound("CC"), _compound("c1ccsc1")])
+    root.box = mb.Box(lengths=[8, 8, 8])
+
+    parameters = parameterize_uff(root)
+
+    assert len(parameters.positions_a) == root.n_particles
+    assert len(parameters.particle_types) == root.n_particles
+    assert set(parameters.particle_types) <= set(parameters.particle_type_params)
+    assert set(parameters.bond_types) <= set(parameters.bond_params)
