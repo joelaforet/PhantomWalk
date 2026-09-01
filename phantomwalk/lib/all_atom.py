@@ -17,9 +17,13 @@ class AllAtomParameters:
 
     positions_a: np.ndarray
     box_lengths_a: np.ndarray
+    masses_amu: np.ndarray = field(default_factory=lambda: np.empty(0))
+    particle_types: list[str] = field(default_factory=list)
+    particle_type_params: dict[str, dict[str, float]] = field(default_factory=dict)
     bonds: list[tuple[int, int]] = field(default_factory=list)
     bond_types: list[str] = field(default_factory=list)
     bond_lengths_a: dict[str, float] = field(default_factory=dict)
+    bond_params: dict[str, dict[str, float]] = field(default_factory=dict)
     angles: list[tuple[int, int, int]] = field(default_factory=list)
     angle_types: list[str] = field(default_factory=list)
     angle_params: dict[str, dict[str, float]] = field(default_factory=dict)

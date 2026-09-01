@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -13,6 +14,7 @@ from phantomwalk.lib.all_atom import (
     parameterize_all_atom,
     update_interchange_positions,
 )
+from phantomwalk.lib.uff import parameterize_uff
 
 
 @dataclass(frozen=True)
@@ -20,13 +22,15 @@ class AllAtomFastFIRESettings:
     """Controls for the deliberately short all-atom FastFIRE protocol."""
 
     force_field: str = "openff-2.3.0.offxml"
-    repulsion: float = 25_000.0
+    parameter_provider: str = "uff"
+    repulsion: float = 5_000.0
     bond_k: float = 250_000.0
     bonded_scale: float = 30.0
     gamma: float = 800.0
-    r_cut: float = 1.01
+    r_cut: float = 3.5
     kT: float = 1.0
-    dt: float = 0.0001
+    dt: float = 0.002
+    checkpoint_directory: str | None = None
     dpd_steps: int = 2_000
     dpd_interval: int = 250
     dpd_max_steps: int = 10_000
@@ -94,14 +98,22 @@ def _frame(parameters: AllAtomParameters) -> Any:
     import gsd.hoomd
 
     frame = gsd.hoomd.Frame()
-    lengths = parameters.box_lengths_a / parameters.sigma_ref_a
-    positions = parameters.positions_a / parameters.sigma_ref_a
+    lengths = parameters.box_lengths_a
+    positions = parameters.positions_a
     positions = (positions - lengths / 2 + lengths / 2) % lengths - lengths / 2
     frame.configuration.box = [*lengths, 0, 0, 0]
     frame.particles.N = len(positions)
-    frame.particles.types = ["A"]
-    frame.particles.typeid = np.zeros(len(positions), dtype=np.uint32)
-    frame.particles.mass = np.ones(len(positions))
+    particle_types = parameters.particle_types or ["A"] * len(positions)
+    unique_particle_types = list(dict.fromkeys(particle_types))
+    frame.particles.types = unique_particle_types
+    frame.particles.typeid = np.asarray(
+        [unique_particle_types.index(name) for name in particle_types], dtype=np.uint32
+    )
+    frame.particles.mass = (
+        parameters.masses_amu
+        if len(parameters.masses_amu) == len(positions)
+        else np.ones(len(positions))
+    )
     frame.particles.position = positions
     _set_groups(frame.bonds, parameters.bonds, parameters.bond_types)
     _set_groups(frame.angles, parameters.angles, parameters.angle_types)
@@ -120,15 +132,22 @@ def _forces(
     if parameters.bonds:
         force = hoomd.md.bond.Harmonic()
         for name, r0 in parameters.bond_lengths_a.items():
-            force.params[name] = {"k": settings.bond_k, "r0": r0 / parameters.sigma_ref_a}
+            k = parameters.bond_params.get(name, {}).get("k", settings.bond_k)
+            force.params[name] = {
+                "k": settings.bonded_scale * k / parameters.epsilon_ref_kcal_mol,
+                "r0": r0,
+            }
         forces.append(force)
     if parameters.angles:
+        # The initializer deliberately retains the validated harmonic HOOMD
+        # force form. UFF supplies its equilibrium angle and local force
+        # coefficient; ``bonded_scale`` places it on the same 30x scale used
+        # by the Sage initializer. Full UFF functional-form equivalence is
+        # tested separately in ``uff_energy_components``.
         force = hoomd.md.angle.Harmonic()
         for name, values in parameters.angle_params.items():
             force.params[name] = {
-                "k": settings.bonded_scale
-                * values["k"]
-                / parameters.epsilon_ref_kcal_mol,
+                "k": settings.bonded_scale * values["k"] / parameters.epsilon_ref_kcal_mol,
                 "t0": values["t0"],
             }
         forces.append(force)
@@ -145,27 +164,42 @@ def _forces(
     if parameters.impropers:
         force = hoomd.md.improper.Periodic()
         for name, values in parameters.improper_params.items():
-            force.params[name] = {
-                **values,
-                "k": settings.bonded_scale
-                * values["k"]
-                / parameters.epsilon_ref_kcal_mol,
-            }
+            if "c0" in values:
+                if not (values["c0"] == 1.0 and values["c1"] == -1.0 and values["c2"] == 0.0):
+                    raise NotImplementedError(
+                        "this UFF inversion Fourier polynomial cannot be represented "
+                        "exactly by HOOMD improper.Periodic"
+                    )
+                force.params[name] = {
+                    "k": settings.bonded_scale * values["k"] / parameters.epsilon_ref_kcal_mol,
+                    "d": -1.0, "n": 1, "chi0": 0.0,
+                }
+            else:
+                force.params[name] = {
+                    **values,
+                    "k": settings.bonded_scale * values["k"] / parameters.epsilon_ref_kcal_mol,
+                }
         forces.append(force)
     nlist = hoomd.md.nlist.Cell(buffer=0.4, exclusions=settings.nlist_exclusions)
+    particle_params = parameters.particle_type_params
+    particle_names = list(particle_params) or ["A"]
     if conservative_dpd:
         dpd = hoomd.md.pair.DPDConservative(
             nlist, default_r_cut=settings.r_cut
         )
-        dpd.params[("A", "A")] = {"A": settings.repulsion}
     else:
         dpd = hoomd.md.pair.DPD(
             nlist, default_r_cut=settings.r_cut, kT=settings.kT
         )
-        dpd.params[("A", "A")] = {
-            "A": settings.repulsion,
-            "gamma": settings.gamma,
-        }
+    for index, first in enumerate(particle_names):
+        epsilon_first = particle_params.get(first, {}).get("epsilon_kcal_mol", parameters.epsilon_ref_kcal_mol)
+        for second in particle_names[index:]:
+            epsilon_second = particle_params.get(second, {}).get("epsilon_kcal_mol", parameters.epsilon_ref_kcal_mol)
+            scale = np.sqrt(epsilon_first * epsilon_second) / parameters.epsilon_ref_kcal_mol
+            values = {"A": settings.repulsion * scale}
+            if not conservative_dpd:
+                values["gamma"] = settings.gamma * scale
+            dpd.params[(first, second)] = values
     forces.append(dpd)
     return forces
 
@@ -191,6 +225,20 @@ def _force_energies(forces: list[Any]) -> dict[str, float]:
             continue
         energies[kind] = float(force.energy)
     return energies
+
+
+def _write_checkpoint(simulation: Any, directory: str | None, name: str) -> None:
+    """Write a restartable GSD checkpoint when requested."""
+
+    if directory is None:
+        return
+    import hoomd
+
+    path = Path(directory)
+    path.mkdir(parents=True, exist_ok=True)
+    hoomd.write.GSD.write(
+        state=simulation.state, filename=str(path / f"{name}.gsd"), mode="wb"
+    )
 
 
 def _intensive_energies(
@@ -253,7 +301,12 @@ def run_all_atom_fastfire(
 
     settings = settings or AllAtomFastFIRESettings()
     started = time.perf_counter()
-    parameters = parameterize_all_atom(compound, settings.force_field)
+    if settings.parameter_provider == "uff":
+        parameters = parameterize_uff(compound)
+    elif settings.parameter_provider == "openff":
+        parameters = parameterize_all_atom(compound, settings.force_field)
+    else:
+        raise ValueError("parameter_provider must be 'uff' or 'openff'")
     parameterized = time.perf_counter()
     frame = _frame(parameters)
     forces = _forces(hoomd, parameters, settings)
@@ -266,6 +319,7 @@ def run_all_atom_fastfire(
         forces=forces,
         methods=[method],
     )
+    _write_checkpoint(simulation, settings.checkpoint_directory, "initial")
     setup = time.perf_counter()
     simulation.run(settings.dpd_steps)
     dpd_steps = settings.dpd_steps
@@ -298,18 +352,21 @@ def run_all_atom_fastfire(
             stable_checks = 0
         previous = current
     dpd_converged = stable_checks >= settings.dpd_consecutive_checks
+    _write_checkpoint(simulation, settings.checkpoint_directory, "post_dpd")
     if settings.require_dpd_convergence and not dpd_converged:
         raise RuntimeError(
             f"DPD energies did not converge within {settings.dpd_max_steps} steps"
         )
     dpd_done = time.perf_counter()
+    simulation.operations.integrator = None
+    fire_method = hoomd.md.methods.ConstantVolume(filter=hoomd.filter.All())
     fire = hoomd.md.minimize.FIRE(
         dt=settings.dt,
         force_tol=settings.fire_force_tol,
         angmom_tol=1000.0,
         energy_tol=settings.fire_energy_tol,
         forces=fire_forces,
-        methods=[method],
+        methods=[fire_method],
     )
     simulation.operations.integrator = fire
     simulation.run(settings.fire_steps)
@@ -319,6 +376,7 @@ def run_all_atom_fastfire(
         simulation.run(interval)
         fire_steps += interval
     fire_done = time.perf_counter()
+    _write_checkpoint(simulation, settings.checkpoint_directory, "post_fire")
     fire_energies = _force_energies(fire_forces)
     if settings.require_fire_convergence and not fire.converged:
         raise RuntimeError(
@@ -328,9 +386,9 @@ def run_all_atom_fastfire(
     snapshot = simulation.state.get_snapshot()
     if snapshot.communicator.rank == 0:
         reduced = np.asarray(snapshot.particles.position, dtype=float)
-        box_reduced = parameters.box_lengths_a / parameters.sigma_ref_a
-        reduced = _unwrap(reduced, parameters.bonds, box_reduced) + box_reduced / 2
-        compound.xyz = reduced * parameters.sigma_ref_a / 10.0
+        box_a = parameters.box_lengths_a
+        reduced = _unwrap(reduced, parameters.bonds, box_a) + box_a / 2
+        compound.xyz = reduced / 10.0
         if interchange is not None:
             update_interchange_positions(interchange, compound)
     return AllAtomFastFIREResult(
