@@ -12,6 +12,23 @@ Build a software environment using the `environment.yml` file and the command ``
 4 - Replace the random walk in the DPD workflow with mbuild self-avoiding random walk.
 5 - Run DPD on a rigid body model used for anisotropic coarse-graining. Based on flowerMD classes.
 
+## All-atom PhantomWalk
+
+The all-atom initializer lives in FlowerMD (`flowermd.library.AllAtomDPD`,
+`AllAtomLattice`, `AllAtomPhantomWalk`, currently on the
+[`joelaforet/flowerMD`](https://github.com/joelaforet/flowerMD) branch
+`aa-dpd-v2/07-smeared-electrostatics`). This repository holds what the
+all-atom experiments need around it, in `phantomwalk/all_atom`: the Sage 2.3.0
+hand-off minimization and its energy-removed-per-atom metric, and ionomer
+ion-aggregate analysis. Demos are in `phantomwalk/examples/all_atom`:
+
+1 - A polyethylene melt from SMILES to Sage-minimized coordinates.
+2 - Atactic polystyrene: stereocenters preserved through initialization and minimization.
+3 - A sodium ionomer initialized with and without smeared electrostatics, compared by ion aggregates.
+
+Use `environment-all-atom.yml` for these (`conda env create -f environment-all-atom.yml`);
+the coarse-grained workflow above is unchanged and keeps `environment.yml`.
+
 ## Installation
 
 First, clone the PhantomWalk repository:
