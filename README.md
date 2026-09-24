@@ -25,9 +25,27 @@ ion-aggregate analysis. Demos are in `phantomwalk/examples/all_atom`:
 1 - A polyethylene melt from SMILES to Sage-minimized coordinates.
 2 - Atactic polystyrene: stereocenters preserved through initialization and minimization.
 3 - A sodium ionomer initialized with and without smeared electrostatics, compared by ion aggregates.
+4 - The six Colina benchmark polymers (PS, PMMA, PET, PC, PEI, PIM-1), exported and analyzed (density, Rg, end-to-end distance, structure factor).
 
-Use `environment-all-atom.yml` for these (`conda env create -f environment-all-atom.yml`);
-the coarse-grained workflow above is unchanged and keeps `environment.yml`.
+Every notebook writes its structures to `outputs/<notebook>/`: residue-aware PDB files of
+the placement, the initialized (DPD + FIRE) and the Sage-minimized coordinates, the DPD
+trajectory as DCD, and PyMOL scripts for pictures and movies. In the PDB files each
+monomer is a residue and each molecule a segment (four base-36 characters, so up to
+1.68 million molecules), CONECT records hold every bond, and molecules are whole, so they
+load directly into MDAnalysis (`phantomwalk.all_atom.universe`), PyMOL and NGLView
+(`phantomwalk.all_atom.visualization`).
+
+Set up the environment for these with
+
+``` sh
+conda env create -f environment-all-atom.yml
+conda activate phantomwalk-all-atom
+pip install -e .
+python -m ipykernel install --user --name phantomwalk-all-atom
+```
+
+and select the `phantomwalk-all-atom` kernel in Jupyter. The coarse-grained workflow above
+is unchanged and keeps `environment.yml`.
 
 ## Installation
 
