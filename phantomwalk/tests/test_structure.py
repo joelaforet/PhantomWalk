@@ -21,11 +21,11 @@ from phantomwalk.all_atom.structure import (  # noqa: E402
 )
 
 
-def _melt(chains, density=0.8, unit="repeat"):
-    from flowermd.library import AllAtomLattice
+def _melt(chains, density=0.8):
+    from flowermd.library import AllAtomRandomWalk
 
-    return AllAtomLattice(
-        chains, density=density * u.g / u.cm**3, unit=unit, seed=1
+    return AllAtomRandomWalk(
+        chains, density=density * u.g / u.cm**3, seed=1
     ).system
 
 
@@ -72,8 +72,7 @@ def test_tactic_residue_names_follow_sequence():
     from flowermd.library import PolyStyrene
 
     compound = _melt(
-        PolyStyrene(lengths=6, num_mols=4, tacticity="atactic", seed=3),
-        unit="chain",
+        PolyStyrene(lengths=6, num_mols=4, tacticity="atactic", seed=3)
     )
     top = residue_topology(compound)
     for m, mol in enumerate(compound.children):
@@ -104,8 +103,7 @@ def test_pdb_round_trip(tmp_path):
     from flowermd.library import PolyStyrene
 
     compound = _melt(
-        PolyStyrene(lengths=4, num_mols=5, tacticity="atactic", seed=2),
-        unit="chain",
+        PolyStyrene(lengths=4, num_mols=5, tacticity="atactic", seed=2)
     )
     top = residue_topology(compound)
     path = write_pdb(top, compound.xyz * 10, tmp_path / "melt.pdb")

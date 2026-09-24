@@ -249,8 +249,8 @@ def _warn_if_wrapped(topology, positions):
     """Warn about molecules whose bonds cannot all be made short.
 
     A simulation measures each bond to the nearest image. If a bond was
-    longer than half the box when it was first measured (possible in a
-    stretched lattice placement), a ring of the molecule, e.g. a ladder
+    longer than half the box when it was first measured (a placement that
+    stretches bonds between repeats), a ring of the molecule, e.g. a ladder
     junction, can close through a periodic image. No coordinates make such
     a molecule whole, and a bond in the written structure spans the box.
     """
